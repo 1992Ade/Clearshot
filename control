@@ -1,0 +1,10 @@
+Package: com.rockylabs.floatbar
+Name: FloatBar
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: Android-style floating navigation bar (Back + Menu) via Picture-in-Picture. No jailbreak.
+Maintainer: 1992Ade
+Author: 1992Ade
+Homepage: https://github.com/1992Ade/FloatBar
+Section: Applications
+Depends: firmware (>= 15.0)
