@@ -4,7 +4,6 @@
 #import "FBAppearance.h"
 
 static const CGFloat kButtonWidth = 56.0;
-static const CGFloat kBarHeight = 56.0;
 
 @interface FBBarViewController () <FBActionHost>
 @property (strong, nonatomic) NSMutableArray<UIButton *> *buttons;
