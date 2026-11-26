@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Global HTTP Proxy payload. ABMainViewController fills in ProxyPACURL
+         at install time with a data:application/x-ns-proxy-autoconfig;base64,…
+         URL that embeds the chosen PAC inline. iOS does NOT fetch anything
+         over the network to set this up — nothing to MITM. -->
+    <key>PayloadType</key>
+    <string>com.apple.proxy.http.global</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+    <key>PayloadIdentifier</key>
+    <string>com.trollbox.adblock.proxy</string>
+    <key>PayloadUUID</key>
+    <string>5b9f3b86-1a2e-4a8c-9b2f-trollbox-ad-blk</string>
+    <key>PayloadDisplayName</key>
+    <string>TrollBox Ad Blocking Proxy</string>
+    <key>PayloadDescription</key>
+    <string>Routes HTTP traffic through a local PAC that sinkholes known ad / tracker / miner / anti-revoke domains. No PAC URL fetched over the network — the PAC is inlined as a data: URL.</string>
+    <key>PayloadOrganization</key>
+    <string>TrollBox</string>
+
+    <key>ProxyType</key>
+    <string>Auto</string>
+    <!-- ProxyPACURL is the key ABMainViewController rewrites at install
+         time (data:application/x-ns-proxy-autoconfig;base64,...). -->
+    <key>ProxyPACURL</key>
+    <string>REPLACED_AT_RUNTIME</string>
+    <key>ProxyPACFallbackAllowed</key>
+    <true/>
+    <key>ProxyCaptiveLoginAllowed</key>
+    <true/>
+</dict>
+</plist>

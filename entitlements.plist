@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- ======================================================================
+         Entitlements for TrollBox. The set is a straight port of what
+         Andromeda/Geranium ships (same signing path: `ldid -S<file>`
+         against an ad-hoc-signed Mach-O), with their app-specific pieces
+         (application-groups, Bookmark extension entitlements) stripped and
+         our screen-capture / QuartzCore additions kept.
+         ====================================================================== -->
+
+    <!-- Core TrollStore — makes us a platform binary (uid 0).
+         The pair (platform-application + no-container + no-sandbox) is
+         what TrollStore checks to decide whether to grant uid 0. -->
+    <key>platform-application</key>
+    <true/>
+    <key>com.apple.private.security.no-container</key>
+    <true/>
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
+    <key>com.apple.private.persona-mgmt</key>
+    <true/>
+    <key>com.apple.private.security.container-manager</key>
+    <true/>
+    <key>com.apple.private.security.system-application</key>
+    <true/>
+
+    <!-- IOKit user clients — note the NON-exception key form, same as
+         Andromeda. Without this CARenderServer can't allocate IOSurfaces
+         from our address space on some devices. -->
+    <key>com.apple.security.iokit-user-client-class</key>
+    <array>
+        <string>AGXDeviceUserClient</string>
+        <string>IOHDIXControllerUserClient</string>
+        <string>IOSurfaceRootUserClient</string>
+    </array>
+
+    <!-- Filesystem: everything. We need /Library/ControlCenter/Bundles/
+         for ClearShot install, /var/containers/Shared/SystemGroup/ for
+         Supervise, and read access elsewhere for the Diagnostics screen. -->
+    <key>com.apple.security.exception.files.absolute-path.read-write</key>
+    <array>
+        <string>/</string>
+    </array>
+
+    <!-- LocSim: lets CLSimulationManager feed fake coordinates to CoreLocation. -->
+    <key>com.apple.locationd.simulation</key>
+    <true/>
+
+    <!-- Supervise: writing the CloudConfigurationDetails.plist touches
+         SystemConfiguration + MobileContainerManager data. -->
+    <key>com.apple.SystemConfiguration.SCDynamicStore-write-access</key>
+    <true/>
+    <key>com.apple.private.MobileContainerManager.allowed</key>
+    <true/>
+    <key>com.apple.private.MobileInstallationHelperService.InstallDaemonOpsEnabled</key>
+    <true/>
+    <key>com.apple.private.MobileInstallationHelperService.allowed</key>
+    <true/>
+    <key>com.apple.private.uninstall.deletion</key>
+    <true/>
+    <key>com.apple.private.security.storage.MobileDocuments</key>
+    <true/>
+    <key>com.apple.private.security.storage.AppDataContainers</key>
+    <true/>
+    <key>com.apple.managedconfiguration.profiled-access</key>
+    <true/>
+    <key>com.apple.mobile.deleted.AllowFreeSpace</key>
+    <true/>
+    <key>com.apple.private.coreservices.canmaplsdatabase</key>
+    <true/>
+    <key>com.apple.lsapplicationworkspace.rebuildappdatabases</key>
+    <true/>
+    <key>com.apple.private.WebClips.read-write</key>
+    <true/>
+
+    <!-- AppRepack: lets us talk to itunesstored via private SKUIItemStateCenter
+         to trigger a native iOS Store download for a specific version id
+         (= Muffinstore's mechanism — no credentials handled by us, iOS
+         reuses the user's active Apple ID session). -->
+    <key>com.apple.itunesstored.private</key>
+    <true/>
+    <key>com.apple.private.mobileinstall.allowedSPI</key>
+    <array>
+        <string>UninstallForLaunchServices</string>
+        <string>SetCapabilities</string>
+        <string>Lookup</string>
+    </array>
+
+    <!-- CARenderServer reach for the in-app Test capture button. The CC
+         module itself inherits SpringBoard's own entitlements at runtime,
+         so these only matter inside the wrapper app. -->
+    <key>com.apple.security.exception.mach-lookup.global-name</key>
+    <array>
+        <string>com.apple.CARenderServer</string>
+        <string>com.apple.backboard.hid.services</string>
+        <string>com.apple.frontboard.systemappservices</string>
+    </array>
+    <key>com.apple.QuartzCore.secure-mode</key>
+    <true/>
+    <key>com.apple.QuartzCore.screen-access</key>
+    <true/>
+
+    <!-- CS exceptions (harmless to keep). -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+</dict>
+</plist>

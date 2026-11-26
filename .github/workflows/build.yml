@@ -1,0 +1,192 @@
+name: Build .tipa
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build TrollBox .tipa
+    runs-on: macos-latest
+    env:
+      THEOS: ${{ github.workspace }}/theos
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: brew install ldid dpkg make xz
+
+      - name: Clone Theos
+        run: git clone --recursive https://github.com/theos/theos.git "$THEOS"
+
+      - name: Download iOS SDK (sparse-checkout)
+        run: |
+          cd "$THEOS"
+          rm -rf sdks
+          git clone --depth 1 --filter=blob:none --no-checkout https://github.com/theos/sdks.git
+          cd sdks
+          git sparse-checkout init --cone
+          git sparse-checkout set iPhoneOS16.5.sdk
+          git checkout
+          ls -d iPhoneOS16.5.sdk
+
+      # ----- Fresh blocklists at build time ------------------------------
+      # Fetch StevenBlack hosts of the day and merge it into each of the 4
+      # MYbloXX PACs shipped in MYbloXX/PAC/. Output goes into
+      # Resources/AdBlock/PAC/ which the Makefile's after-stage embeds
+      # inside the .app. The baseline PACs in MYbloXX/PAC/ remain usable
+      # if this step fails (StevenBlack outage etc.) — this job then falls
+      # back to copying the baselines verbatim.
+      - name: Fetch StevenBlack hosts
+        run: |
+          mkdir -p dist
+          curl -sfL https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts \
+            -o /tmp/sb.hosts || echo "StevenBlack fetch failed — baseline PACs will be used as-is"
+
+      - name: Merge StevenBlack into PACs (or copy baselines on failure)
+        run: |
+          mkdir -p Resources/AdBlock/PAC
+          if [ -s /tmp/sb.hosts ]; then
+            python3 MYbloXX/scripts/merge-stevenblack.py \
+              --pac-dir     MYbloXX/PAC \
+              --hosts       /tmp/sb.hosts \
+              --output-dir  Resources/AdBlock/PAC
+          else
+            cp MYbloXX/PAC/*.pac Resources/AdBlock/PAC/
+          fi
+          mkdir -p Resources/AdBlock/Templates
+          cp MYbloXX/Templates/*.plist Resources/AdBlock/Templates/
+
+      - name: Pre-build the 8 Release .mobileconfigs
+        run: |
+          mkdir -p dist/mobileconfigs
+          python3 MYbloXX/scripts/generate-mobileconfigs.py \
+            --pac-dir    Resources/AdBlock/PAC \
+            --templates  MYbloXX/Templates \
+            --output-dir dist/mobileconfigs
+
+      # ----- Build .tipa --------------------------------------------------
+      # Copy the merged PACs + templates into MYbloXX/ too so the Makefile's
+      # after-stage can embed them (it looks under MYbloXX/PAC/ and
+      # MYbloXX/Templates/). This replaces the committed baselines with the
+      # fresh merged ones just for this build — nothing is pushed back.
+      - name: Stage freshly-merged assets for packaging
+        run: |
+          cp -f Resources/AdBlock/PAC/*.pac       MYbloXX/PAC/
+          cp -f Resources/AdBlock/Templates/*.plist MYbloXX/Templates/
+
+      - name: Build
+        run: |
+          export THEOS="$THEOS"
+          make clean || true
+          make package FINALPACKAGE=1
+          echo "== packages dir =="
+          ls -la packages/ || echo "(no packages dir)"
+
+      - name: Package .tipa
+        run: |
+          set -e
+          mkdir -p dist
+          DEB=$(ls packages/*.deb 2>/dev/null | head -1)
+          if [ -z "$DEB" ]; then
+            echo "ERROR: no .deb produced by make"
+            ls -la packages/ || true
+            exit 1
+          fi
+          echo "Using .deb: $DEB"
+          mkdir -p /tmp/unpack
+          dpkg-deb -x "$DEB" /tmp/unpack
+          APP=$(find /tmp/unpack -name "ClearShot.app" -type d | head -1)
+          if [ -z "$APP" ]; then
+            echo "ERROR: no ClearShot.app inside .deb"
+            find /tmp/unpack -type d
+            exit 1
+          fi
+          echo "== .app contents =="
+          ls -la "$APP"
+          if [ -d "$APP/ClearShotModule.bundle" ]; then
+            echo "== CC bundle =="
+            ls -la "$APP/ClearShotModule.bundle"
+          else
+            echo "ERROR: ClearShotModule.bundle is NOT embedded inside the .app!"
+            exit 1
+          fi
+          if [ -d "$APP/AdBlock" ]; then
+            echo "== AdBlock assets =="
+            ls -la "$APP/AdBlock/PAC/" "$APP/AdBlock/Templates/"
+          else
+            echo "WARN: AdBlock/ not embedded — Ad Blocking won't be able to install profiles"
+          fi
+          mkdir -p /tmp/tipa/Payload
+          cp -R "$APP" /tmp/tipa/Payload/
+          cd /tmp/tipa
+          zip -r "$GITHUB_WORKSPACE/dist/TrollBox.tipa" Payload
+          ls -la "$GITHUB_WORKSPACE/dist/"
+
+      - name: Upload .tipa artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrollBox-tipa
+          path: dist/TrollBox.tipa
+          if-no-files-found: warn
+
+      - name: Upload Ad Blocking mobileconfigs artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrollBox-AdBlocking-mobileconfigs
+          path: dist/mobileconfigs/*.mobileconfig
+          if-no-files-found: warn
+
+      - name: Create / update rolling release
+        if: success() && github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO:    ${{ github.repository }}
+          SHA:     ${{ github.sha }}
+          BRANCH:  ${{ github.ref_name }}
+        run: |
+          set -e
+          NOTES="Automatic build from commit \`$SHA\` on branch \`$BRANCH\`.
+
+          **Install via TrollStore** — paste this URL in *Install from URL*:
+          \`\`\`
+          https://github.com/$REPO/releases/latest/download/TrollBox.tipa
+          \`\`\`
+
+          **For non-TrollStore users** (iPhone already supervised via Apple Configurator 2):
+          grab one of the pre-generated \`.mobileconfig\` files below and open it
+          on your iPhone (Safari / AirDrop → Settings → Profile Downloaded)."
+
+          gh release delete latest --yes --cleanup-tag --repo "$REPO" 2>/dev/null || true
+          gh release create latest \
+            dist/TrollBox.tipa \
+            dist/mobileconfigs/*.mobileconfig \
+            --repo "$REPO" \
+            --title "Latest build" \
+            --notes "$NOTES" \
+            --latest
+
+      - name: Create tagged release
+        if: success() && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO:    ${{ github.repository }}
+          TAG:     ${{ github.ref_name }}
+        run: |
+          set -e
+          gh release create "$TAG" \
+            dist/TrollBox.tipa \
+            dist/mobileconfigs/*.mobileconfig \
+            --repo "$REPO" \
+            --title "$TAG" \
+            --generate-notes

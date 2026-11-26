@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>ClearShot</string>
+    <key>CFBundleExecutable</key>
+    <string>ClearShotModule</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.rockylabs.clearshot.module</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>ClearShot</string>
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array>
+        <string>iPhoneOS</string>
+    </array>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>MinimumOSVersion</key>
+    <string>15.0</string>
+
+    <!-- SpringBoard loads this class when displaying the module. -->
+    <key>NSPrincipalClass</key>
+    <string>CSModule</string>
+    <key>CCUIControlClassName</key>
+    <string>CSModule</string>
+
+    <!-- Metadata used by the "Customize Controls" list in Settings. -->
+    <key>SBIconClass</key>
+    <string>SBControlCenterBundleIcon</string>
+    <key>UIBackgroundModes</key>
+    <array/>
+
+    <!-- Where this module sits in the controls list. -->
+    <key>CCSInsertionHint</key>
+    <string>middle</string>
+</dict>
+</plist>

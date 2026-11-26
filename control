@@ -1,0 +1,10 @@
+Package: com.rockylabs.clearshot
+Name: TrollBox
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: A single-icon bundle of iOS 14-16 TrollStore utilities - LocSim, Ad Blocking (MYbloXX-style), ResSetter, Badge Color, ClearShot (FLAG_SECURE bypass screenshots), Supervise, Tweaks, Reclaim Space, AppRepack (Muffinstore-style), About Device.
+Maintainer: 1992Ade
+Author: 1992Ade
+Homepage: https://github.com/1992Ade/TrollBox
+Section: Applications
+Depends: firmware (>= 14.0)

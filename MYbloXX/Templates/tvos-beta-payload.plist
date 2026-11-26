@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- The classic "iOS update blocker" : advertise ourselves as a tvOS
+         Beta Software Profile. Software Update then stops offering iOS
+         updates because it believes the device is enrolled in a tvOS beta.
+         Reversible by removing the profile from Settings > General > VPN &
+         Device Management. -->
+    <key>PayloadType</key>
+    <string>com.apple.defaults.managed</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+    <key>PayloadIdentifier</key>
+    <string>com.trollbox.adblock.notv</string>
+    <key>PayloadUUID</key>
+    <string>a1c2e3f4-5678-90ab-cdef-trollbox-no-ota</string>
+    <key>PayloadDisplayName</key>
+    <string>tvOS Beta Software Profile</string>
+    <key>PayloadDescription</key>
+    <string>Installing this profile makes iOS Software Update treat the device as enrolled in a tvOS beta programme, which stops it from offering iOS updates. This is a well-known reversible trick; remove the profile to re-enable updates.</string>
+    <key>PayloadOrganization</key>
+    <string>Apple Beta Software Program</string>
+
+    <key>PayloadContent</key>
+    <array>
+        <dict>
+            <key>DefaultsDomain</key>
+            <string>com.apple.coreservices.useractivityd.plist</string>
+            <key>DefaultsData</key>
+            <dict>
+                <key>SeedProgram</key>
+                <string>AppleTVSoftwareSeed</string>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>
