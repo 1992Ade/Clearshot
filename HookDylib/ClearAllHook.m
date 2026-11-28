@@ -32,28 +32,6 @@
 #import <dlfcn.h>
 
 // ----------------------------------------------------------------------------
-// Private BKS declarations. BKSTerminate* accepts a bundleId and a reason
-// code; same mechanism iOS uses when the user force-quits from the native
-// switcher. Resolved at runtime so a missing symbol doesn't break dyld
-// loading.
-// ----------------------------------------------------------------------------
-typedef void (*bks_terminate_fn)(NSString *bundleId, int reason,
-                                  int subReason, NSString *description);
-
-static bks_terminate_fn cah_bks_terminate(void) {
-    static bks_terminate_fn fn = NULL;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        void *h = dlopen("/System/Library/PrivateFrameworks/"
-                          "BackBoardServices.framework/BackBoardServices",
-                          RTLD_LAZY);
-        if (h) fn = (bks_terminate_fn)dlsym(h,
-            "BKSTerminateApplicationForReasonAndReportWithDescription");
-    });
-    return fn;
-}
-
-// ----------------------------------------------------------------------------
 // Exclusion list.
 // ----------------------------------------------------------------------------
 static NSSet<NSString *> *cah_exclusion_set(void) {
