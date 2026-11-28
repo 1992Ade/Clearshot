@@ -19,7 +19,7 @@ LIBRARY_NAME     = libClearShotHook libClearAllHook
 ClearShot_FILES = $(wildcard ClearShot/*.m)
 ClearShot_FRAMEWORKS = UIKit CoreGraphics QuartzCore Photos CoreLocation IOKit SystemConfiguration CoreServices Security MapKit
 ClearShot_PRIVATE_FRAMEWORKS = StoreKitUI Preferences StoreServices
-ClearShot_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unguarded-availability-new
+ClearShot_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unguarded-availability-new -Wno-arc-performSelector-leaks
 ClearShot_CODESIGN_FLAGS = -Sentitlements.plist
 ClearShot_INSTALL_PATH = /Applications
 
