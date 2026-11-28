@@ -1,4 +1,5 @@
 #import "ADMainViewController.h"
+#import "TBDiagnosticsManager.h"
 #import <sys/sysctl.h>
 #import <sys/mount.h>
 #import <sys/utsname.h>
@@ -15,13 +16,18 @@ typedef struct __IOPSPowerSource *IOPSPowerSourceRef;
 extern CFTypeRef IOPSCopyPowerSourcesInfo(void);
 extern CFArrayRef IOPSCopyPowerSourcesList(CFTypeRef blob);
 extern CFDictionaryRef IOPSGetPowerSourceDescription(CFTypeRef blob, CFTypeRef ps);
-// Private keys — strings, not symbols.
+// Private keys — strings, not symbols. The ones below the comment were
+// missing in the original port; NiceBattery uses all of them.
 #define kIOPMPSAppleRawMaxCapacityKey  @"AppleRawMaxCapacity"
 #define kIOPMPSDesignCapacityKey       @"DesignCapacity"
 #define kIOPMPSCycleCountKey           @"CycleCount"
 #define kIOPMPSVoltageKey              @"Voltage"
 #define kIOPMPSTemperatureKey          @"Temperature"
 #define kIOPMPSTimeRemainingKey        @"TimeRemaining"
+#define kIOPMPSAmperageKey             @"Amperage"
+#define kIOPMPSInstantAmperageKey      @"InstantAmperage"
+#define kIOPMPSNominalChargeKey        @"NominalChargeCapacity"
+#define kIOPMPSAdapterDetailsKey       @"AdapterDetails"
 
 @interface ADSection : NSObject
 @property (copy) NSString *title;
@@ -32,6 +38,10 @@ extern CFDictionaryRef IOPSGetPowerSourceDescription(CFTypeRef blob, CFTypeRef p
 
 @interface ADMainViewController ()
 @property (strong, nonatomic) NSArray<ADSection *> *sections;
+// Auto-refresh of the Battery section only. 1.5 s cadence like NiceBattery.
+// Started in viewWillAppear:, invalidated in viewWillDisappear: — zero cost
+// if the user isn't looking at this screen.
+@property (strong, nonatomic) NSTimer *batteryRefreshTimer;
 @end
 
 @implementation ADMainViewController
@@ -57,6 +67,47 @@ extern CFDictionaryRef IOPSGetPowerSourceDescription(CFTypeRef blob, CFTypeRef p
     [self reload];
 }
 
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self startBatteryAutoRefresh];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [self stopBatteryAutoRefresh];
+}
+
+- (void)dealloc {
+    [self stopBatteryAutoRefresh];
+}
+
+- (void)startBatteryAutoRefresh {
+    [self stopBatteryAutoRefresh];
+    __weak typeof(self) weakSelf = self;
+    self.batteryRefreshTimer =
+        [NSTimer scheduledTimerWithTimeInterval:1.5
+                                         repeats:YES
+                                           block:^(NSTimer *t) {
+        [weakSelf refreshBatterySectionOnly];
+    }];
+}
+
+- (void)stopBatteryAutoRefresh {
+    [self.batteryRefreshTimer invalidate];
+    self.batteryRefreshTimer = nil;
+}
+
+- (void)refreshBatterySectionOnly {
+    if (!self.sections.count) return;
+    NSMutableArray *s = [self.sections mutableCopy];
+    s[0] = [self batterySection];
+    // If an adapter is now plugged in or out, the 2nd row count changes —
+    // reload the whole Battery section rather than individual rows.
+    self.sections = s;
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:0]
+                  withRowAnimation:UITableViewRowAnimationNone];
+}
+
 - (void)reload {
     NSMutableArray *s = [NSMutableArray array];
     [s addObject:[self batterySection]];
@@ -65,6 +116,7 @@ extern CFDictionaryRef IOPSGetPowerSourceDescription(CFTypeRef blob, CFTypeRef p
     [s addObject:[self memorySection]];
     [s addObject:[self storageSection]];
     [s addObject:[self networkSection]];
+    [s addObject:[self diagnosticsSection]];
     self.sections = s;
     [self.tableView reloadData];
 }
@@ -99,17 +151,25 @@ extern CFDictionaryRef IOPSGetPowerSourceDescription(CFTypeRef blob, CFTypeRef p
         if (list && CFArrayGetCount(list) > 0) {
             CFDictionaryRef desc = IOPSGetPowerSourceDescription(blob, CFArrayGetValueAtIndex(list, 0));
             NSDictionary *d = (__bridge NSDictionary *)desc;
-            NSNumber *designMAh = d[kIOPMPSDesignCapacityKey];
-            NSNumber *rawMAh    = d[kIOPMPSAppleRawMaxCapacityKey];
-            NSNumber *cycles    = d[kIOPMPSCycleCountKey];
-            NSNumber *voltageMV = d[kIOPMPSVoltageKey];
-            NSNumber *temp      = d[kIOPMPSTemperatureKey];
-            NSNumber *remaining = d[kIOPMPSTimeRemainingKey];
+            NSNumber *designMAh    = d[kIOPMPSDesignCapacityKey];
+            NSNumber *rawMAh       = d[kIOPMPSAppleRawMaxCapacityKey];
+            NSNumber *nominalMAh   = d[kIOPMPSNominalChargeKey];
+            NSNumber *cycles       = d[kIOPMPSCycleCountKey];
+            NSNumber *voltageMV    = d[kIOPMPSVoltageKey];
+            NSNumber *temp         = d[kIOPMPSTemperatureKey];
+            NSNumber *remaining    = d[kIOPMPSTimeRemainingKey];
+            NSNumber *amperage     = d[kIOPMPSAmperageKey];
+            NSNumber *instantAmp   = d[kIOPMPSInstantAmperageKey];
+            NSDictionary *adapter  = d[kIOPMPSAdapterDetailsKey];
 
             if (designMAh) [rows addObject:@[@"Design capacity",
                                              [NSString stringWithFormat:@"%@ mAh", designMAh]]];
             if (rawMAh)    [rows addObject:@[@"Current max",
                                              [NSString stringWithFormat:@"%@ mAh", rawMAh]]];
+            if (nominalMAh && ![nominalMAh isEqual:rawMAh]) {
+                [rows addObject:@[@"Nominal charge",
+                                  [NSString stringWithFormat:@"%@ mAh", nominalMAh]]];
+            }
             if (designMAh.doubleValue > 0 && rawMAh.doubleValue > 0) {
                 double pct = rawMAh.doubleValue / designMAh.doubleValue * 100.0;
                 [rows addObject:@[@"Battery health",
@@ -119,6 +179,26 @@ extern CFDictionaryRef IOPSGetPowerSourceDescription(CFTypeRef blob, CFTypeRef p
             if (voltageMV) [rows addObject:@[@"Voltage",
                                              [NSString stringWithFormat:@"%.3f V",
                                               voltageMV.doubleValue / 1000.0]]];
+            // Negative mA → discharging, positive → charging. iOS exposes
+            // both an averaged `Amperage` and an instantaneous one; the
+            // second updates every few hundred ms, the first is smoothed.
+            if (amperage) {
+                [rows addObject:@[@"Current",
+                                  [NSString stringWithFormat:@"%+d mA",
+                                   amperage.intValue]]];
+            }
+            if (instantAmp && ![instantAmp isEqual:amperage]) {
+                [rows addObject:@[@"Instant current",
+                                  [NSString stringWithFormat:@"%+d mA",
+                                   instantAmp.intValue]]];
+            }
+            // Computed power. Only meaningful when BOTH V and A are set.
+            if (voltageMV.doubleValue > 0 && amperage) {
+                double watts = (voltageMV.doubleValue / 1000.0) *
+                               (amperage.doubleValue / 1000.0);
+                [rows addObject:@[@"Power",
+                                  [NSString stringWithFormat:@"%+.2f W", watts]]];
+            }
             if (temp) [rows addObject:@[@"Temperature",
                                         [NSString stringWithFormat:@"%.1f °C",
                                          temp.doubleValue / 100.0]]];
@@ -128,12 +208,41 @@ extern CFDictionaryRef IOPSGetPowerSourceDescription(CFTypeRef blob, CFTypeRef p
                                   [NSString stringWithFormat:@"%d h %02d min",
                                    mins / 60, mins % 60]]];
             }
+            // Adapter details only appear when something is plugged in.
+            if ([adapter isKindOfClass:[NSDictionary class]] && adapter.count) {
+                NSString *name  = adapter[@"Name"] ?: adapter[@"Description"];
+                NSNumber *watts = adapter[@"Watts"];
+                NSNumber *wire  = adapter[@"IsWireless"];
+                NSMutableString *desc = [NSMutableString string];
+                if (name) [desc appendString:name];
+                if (watts.doubleValue > 0) {
+                    if (desc.length) [desc appendString:@" · "];
+                    [desc appendFormat:@"%@ W", watts];
+                }
+                if ([wire boolValue]) {
+                    if (desc.length) [desc appendString:@" · "];
+                    [desc appendString:@"wireless"];
+                }
+                if (desc.length == 0) [desc appendString:@"plugged in"];
+                [rows addObject:@[@"Adapter", desc]];
+            }
         }
         if (list) CFRelease(list);
         CFRelease(blob);
     }
 
     sec.rows = rows;
+    return sec;
+}
+
+#pragma mark - Diagnostics
+
+- (ADSection *)diagnosticsSection {
+    ADSection *sec = [ADSection new];
+    sec.title = @"Diagnostics";
+    // A single row, treated specially in cellForRow / didSelectRow to open
+    // the TBDiagnosticsManager report in a scrollable sheet.
+    sec.rows = @[ @[@"Run full diagnostic report", @"opens →"] ];
     return sec;
 }
 
@@ -312,7 +421,141 @@ extern CFDictionaryRef IOPSGetPowerSourceDescription(CFTypeRef blob, CFTypeRef p
     cell.textLabel.textColor = [UIColor whiteColor];
     cell.detailTextLabel.textColor = [UIColor lightGrayColor];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    // Diagnostics row looks tappable and gets a chevron.
+    if ([self.sections[ip.section].title isEqualToString:@"Diagnostics"]) {
+        cell.textLabel.textColor = [UIColor systemBlueColor];
+        cell.detailTextLabel.text = nil;
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    }
     return cell;
+}
+
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [tv deselectRowAtIndexPath:ip animated:YES];
+    if (![self.sections[ip.section].title isEqualToString:@"Diagnostics"]) return;
+    [self presentDiagnosticsReport];
+}
+
+#pragma mark - Diagnostics report sheet
+
+- (void)presentDiagnosticsReport {
+    NSString *report = [TBDiagnosticsManager fullReport] ?: @"(empty report)";
+
+    UIViewController *vc = [[UIViewController alloc] init];
+    vc.view.backgroundColor = [UIColor colorWithRed:0.08 green:0.08 blue:0.12 alpha:1.0];
+
+    UILabel *header = [[UILabel alloc] init];
+    header.text = @"Diagnostics";
+    header.textColor = [UIColor whiteColor];
+    header.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+    header.translatesAutoresizingMaskIntoConstraints = NO;
+    [vc.view addSubview:header];
+
+    UITextView *tv = [[UITextView alloc] init];
+    tv.text = report;
+    tv.editable = NO;
+    tv.backgroundColor = [UIColor colorWithWhite:0.1 alpha:1.0];
+    tv.textColor = [UIColor whiteColor];
+    tv.font = [UIFont fontWithName:@"Menlo" size:11];
+    tv.layer.cornerRadius = 8;
+    tv.textContainerInset = UIEdgeInsetsMake(10, 10, 10, 10);
+    tv.translatesAutoresizingMaskIntoConstraints = NO;
+    [vc.view addSubview:tv];
+
+    UIButton *copy = [UIButton buttonWithType:UIButtonTypeSystem];
+    [copy setTitle:@"Copy" forState:UIControlStateNormal];
+    [copy setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    copy.backgroundColor = [UIColor systemBlueColor];
+    copy.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    copy.layer.cornerRadius = 10;
+    copy.translatesAutoresizingMaskIntoConstraints = NO;
+    copy.accessibilityValue = report;    // stash text for handler
+    [copy addTarget:self action:@selector(diagCopy:)
+      forControlEvents:UIControlEventTouchUpInside];
+    [vc.view addSubview:copy];
+
+    UIButton *share = [UIButton buttonWithType:UIButtonTypeSystem];
+    [share setTitle:@"Share" forState:UIControlStateNormal];
+    [share setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    share.backgroundColor = [UIColor systemGreenColor];
+    share.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    share.layer.cornerRadius = 10;
+    share.translatesAutoresizingMaskIntoConstraints = NO;
+    share.accessibilityValue = report;
+    [share addTarget:self action:@selector(diagShare:)
+       forControlEvents:UIControlEventTouchUpInside];
+    [vc.view addSubview:share];
+
+    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
+    [close setTitle:@"Close" forState:UIControlStateNormal];
+    [close setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    close.backgroundColor = [UIColor colorWithWhite:0.25 alpha:1.0];
+    close.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    close.layer.cornerRadius = 10;
+    close.translatesAutoresizingMaskIntoConstraints = NO;
+    [close addTarget:self action:@selector(diagClose:)
+       forControlEvents:UIControlEventTouchUpInside];
+    [vc.view addSubview:close];
+
+    UILayoutGuide *g = vc.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [header.topAnchor      constraintEqualToAnchor:g.topAnchor constant:20],
+        [header.leadingAnchor  constraintEqualToAnchor:g.leadingAnchor constant:20],
+        [header.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-20],
+
+        [tv.topAnchor      constraintEqualToAnchor:header.bottomAnchor constant:16],
+        [tv.leadingAnchor  constraintEqualToAnchor:g.leadingAnchor constant:16],
+        [tv.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
+        [tv.bottomAnchor   constraintEqualToAnchor:copy.topAnchor constant:-12],
+
+        [copy.leadingAnchor  constraintEqualToAnchor:g.leadingAnchor constant:16],
+        [copy.heightAnchor   constraintEqualToConstant:44],
+        [copy.bottomAnchor   constraintEqualToAnchor:g.bottomAnchor constant:-16],
+        [copy.widthAnchor    constraintEqualToAnchor:share.widthAnchor],
+
+        [share.leadingAnchor constraintEqualToAnchor:copy.trailingAnchor constant:8],
+        [share.heightAnchor  constraintEqualToConstant:44],
+        [share.bottomAnchor  constraintEqualToAnchor:g.bottomAnchor constant:-16],
+        [share.widthAnchor   constraintEqualToAnchor:close.widthAnchor],
+
+        [close.leadingAnchor  constraintEqualToAnchor:share.trailingAnchor constant:8],
+        [close.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
+        [close.heightAnchor   constraintEqualToConstant:44],
+        [close.bottomAnchor   constraintEqualToAnchor:g.bottomAnchor constant:-16],
+    ]];
+
+    vc.modalPresentationStyle = UIModalPresentationFullScreen;
+    [self presentViewController:vc animated:YES completion:nil];
+}
+
+- (void)diagCopy:(UIButton *)sender {
+    NSString *t = sender.accessibilityValue;
+    if (t) [UIPasteboard generalPasteboard].string = t;
+    UIColor *orig = sender.backgroundColor;
+    [UIView animateWithDuration:0.1 animations:^{
+        sender.backgroundColor = [UIColor systemGreenColor];
+    } completion:^(BOOL finished) {
+        [UIView animateWithDuration:0.3 delay:0.2 options:0 animations:^{
+            sender.backgroundColor = orig;
+        } completion:nil];
+    }];
+}
+
+- (void)diagShare:(UIButton *)sender {
+    NSString *t = sender.accessibilityValue ?: @"";
+    UIViewController *presented = sender.window.rootViewController.presentedViewController;
+    UIActivityViewController *av =
+        [[UIActivityViewController alloc] initWithActivityItems:@[t]
+                                         applicationActivities:nil];
+    av.popoverPresentationController.sourceView = sender;
+    av.popoverPresentationController.sourceRect = sender.bounds;
+    [presented presentViewController:av animated:YES completion:nil];
+}
+
+- (void)diagClose:(UIButton *)sender {
+    [self dismissViewControllerAnimated:YES completion:nil];
 }
 
 @end

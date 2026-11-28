@@ -49,51 +49,57 @@
     [scroll addSubview:blurb];
     y += blurb.frame.size.height + 20;
 
-    // Sections included.
+    // Sections included (post-2026-11-28 reorg).
     y = [self appendSection:@"Sections included"
-                       body:@"• LocSim — simulated CLLocation via CLSimulationManager\n"
+                       body:@"• LocSim — simulated CLLocation (MapKit UI, favorites, re-center)\n"
                             @"• Ad Blocking — MYbloXX-style blocker, PACs embedded locally\n"
-                            @"• ResSetter — display canvas size override, with persist-at-boot\n"
-                            @"• Badge Color — recolor SpringBoard notification badges\n"
-                            @"• ClearShot — Control Center screenshot that bypasses FLAG_SECURE\n"
+                            @"• Reclaim Space — delete logs, caches, orphan containers iOS forgets\n"
+                            @"• AppRepack — install older AND newer versions (Muffinstore + MinOS patcher)\n"
+                            @"• SpringBoard Tweaks — Badge Color + Clear All in app switcher + Don't lock mirror\n"
+                            @"• ResSetter — slider ×1.0→×1.5, landscape-form fix, Reset to native\n"
+                            @"• ClearShot — CC Capture + Record, bypasses FLAG_SECURE, native-gesture hook\n"
                             @"• Supervise — toggle IsSupervised / OrganizationName\n"
-                            @"• Tweaks — dylib / bundle injection (TrollFools-style, WIP)\n"
-                            @"• Reclaim Space — delete the analytics/crash/support logs iOS forgets\n"
-                            @"• AppRepack — install older compatible app versions (Muffinstore port)\n"
-                            @"• Jaility — small iOS system tweaks (scaffolded)\n"
-                            @"• About Device — battery health, CPU, RAM, storage, network"
+                            @"• Tweaks — dylib / bundle injection (TrollFools engine ported)\n"
+                            @"• Saved WiFi — list, reveal, forget, export known networks\n"
+                            @"• About Device — battery, CPU, RAM, storage, network, diagnostics"
                       intoScroll:scroll
                                y:y
                                w:w];
 
-    // Credits — this is the "remerciments et sources successives" the
-    // user explicitly asked for. One entry per upstream, with what we
-    // took from it.
+    // Credits — upstream + collaborators. One entry per source, with what
+    // we took from it.
     y = [self appendSection:@"Credits & upstream sources"
                        body:@"TrollBox ports, adapts or reuses work from these projects. Thanks to their authors.\n\n"
                             @"• TrollStore (opa334) — platform-application ecosystem\n"
                             @"  github.com/opa334/TrollStore\n\n"
                             @"• TrollInstallerDark (rockylabs-dev) — TrollStore installer for iOS 15.8.x\n"
                             @"  github.com/rockylabs-dev/TrollInstallerDark\n\n"
-                            @"• Andromeda / Geranium (Son3ra1n) — LocSim, Supervise, respring, entitlements template\n"
+                            @"• Andromeda / Geranium (Son3ra1n) — LocSim MapKit UI, Supervise, respring, setuid(0) pattern, entitlements template\n"
                             @"  github.com/Son3ra1n/Andromeda\n\n"
-                            @"• TrollFools (Lessica) — Tweaks section dylib/bundle injection path\n"
+                            @"• TrollFools (Lessica) — Tweaks injection engine (TFInjector / TFMachO / TFCodesign ports)\n"
                             @"  github.com/Lessica/TrollFools\n\n"
                             @"• ResolutionSetterSwift (haoict) — ResSetter mechanism\n"
                             @"  github.com/haoict/ResolutionSetterSwift\n\n"
-                            @"• NiceBattery — About Device battery metrics via IOPowerSources\n\n"
+                            @"• NiceBattery — About Device battery metrics + auto-refresh pattern\n\n"
                             @"• MYbloXX for iOS (pegakmupyem) — Ad Blocking mechanism + base PACs\n"
                             @"  github.com/pegakmupyem/myxxdev\n\n"
                             @"• StevenBlack/hosts — fresh blocklists merged into the PACs at build\n"
                             @"  github.com/StevenBlack/hosts\n\n"
-                            @"• Muffinstore (mineek) — AppRepack mechanism (SKUIItemStateCenter)\n"
+                            @"• Muffinstore (mineek) — AppRepack mechanism\n"
                             @"  github.com/mineek/muffinstore\n\n"
                             @"• Cowabunga (leminlimez, BadgeChanger by exerhythm) — Badge Color\n"
                             @"  github.com/leminlimez/Cowabunga\n\n"
-                            @"• Jaility (haxi0) — Jaility section toggles\n\n"
+                            @"• Jaility (haxi0) — SBDontLockAfterCrash mechanism migrated into ResSetter\n\n"
+                            @"• WiFiList (EthanArbuckle) — Saved WiFi plist layout + keychain query inspiration\n\n"
                             @"• YTLite (dayanch96), BHInstagram, BHTwitter (BandarHL) — example tweak sources referenced in Tweaks\n\n"
                             @"• Apple Configurator 2 — documented path for non-TrollStore supervision (free, Mac App Store)\n\n"
-                            @"• Amy While — SpringBoard respring-by-snapshot trick\n"
+                            @"• Amy While — SpringBoard respring-by-snapshot trick\n\n"
+                            @"• c22dev/TrollBox — the app icon (GPL v3, re-used with attribution)\n"
+                            @"  github.com/c22dev/TrollBox\n\n"
+                            @"• Claude (Anthropic) — development assistance across the refactor:\n"
+                            @"  large section rewrites (ResSetter, AppRepack, Reclaim Space),\n"
+                            @"  TBDiagnosticsManager, Saved WiFi, README + About, bug hunting.\n"
+                            @"  claude.com\n"
                       intoScroll:scroll
                                y:y
                                w:w];

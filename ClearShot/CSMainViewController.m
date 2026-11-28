@@ -1,6 +1,9 @@
 #import "CSMainViewController.h"
 #import "CSInstaller.h"
 #import "CSProcessUtils.h"
+#import "CSRecordSettingsViewController.h"
+#import "TFInjector.h"
+#import "TBSpringBoardPrefs.h"
 
 @interface CSMainViewController ()
 @property (strong, nonatomic) UIScrollView *scrollView;
@@ -9,7 +12,6 @@
 @property (strong, nonatomic) UIButton *respringBtn;
 @property (strong, nonatomic) UIButton *openSettingsBtn;
 @property (strong, nonatomic) UIButton *testCaptureBtn;
-@property (strong, nonatomic) UIButton *diagnosticsBtn;
 @end
 
 @implementation CSMainViewController
@@ -91,19 +93,47 @@
                                     action:@selector(didTapTestCapture)];
     y += 62;
 
-    // Diagnostics button — fires the full on-device inspection and shows it
-    // in a scrollable sheet so it can be screenshotted and sent back.
-    self.diagnosticsBtn = [self makeButton:@"Diagnostics"
-                                         y:y
-                                     color:[UIColor colorWithRed:0.3 green:0.2 blue:0.4 alpha:1.0]
-                                    action:@selector(didTapDiagnostics)];
+    [self makeButton:@"Record settings…"
+                   y:y
+               color:[UIColor colorWithWhite:0.18 alpha:1.0]
+              action:@selector(didTapRecordSettings)];
+    y += 62;
+
+    [self makeButton:@"Native gesture bypass (via Tweaks)"
+                   y:y
+               color:[UIColor colorWithRed:0.18 green:0.14 blue:0.28 alpha:1.0]
+              action:@selector(didTapNativeHook)];
     y += 72;
 
-    UILabel *footer = [[UILabel alloc] initWithFrame:CGRectMake(20, y, w - 40, 80)];
+    // Don't-lock-after-respring mirror. ClearShot's "Install Control Center
+    // module" triggers a respring; same toggle lives in ResSetter, Badge
+    // Color and SpringBoard Tweaks. TBSpringBoardPrefs keeps them in sync.
+    UILabel *dlLabel = [[UILabel alloc] initWithFrame:
+                         CGRectMake(20, y, w - 40 - 60, 32)];
+    dlLabel.text = @"Don't lock after respring";
+    dlLabel.textColor = [UIColor whiteColor];
+    dlLabel.font = [UIFont systemFontOfSize:14];
+    [self.scrollView addSubview:dlLabel];
+
+    UISwitch *dlSwitch = [[UISwitch alloc] initWithFrame:
+                           CGRectMake(w - 20 - 50, y, 50, 32)];
+    dlSwitch.on = [TBSpringBoardPrefs dontLockActive];
+    [dlSwitch addTarget:self action:@selector(didToggleDontLock:)
+         forControlEvents:UIControlEventValueChanged];
+    [self.scrollView addSubview:dlSwitch];
+    y += 42;
+
+    UILabel *footer = [[UILabel alloc] initWithFrame:CGRectMake(20, y, w - 40, 160)];
     footer.text = @"After step 1 + 2, open Settings → Control Center and add "
-                  @"'ClearShot' to your included controls. Then swipe into "
-                  @"Control Center from any app and tap it.\n\n"
-                  @"If anything fails, tap Diagnostics and screenshot the result.";
+                  @"'ClearShot' and 'ClearShot Record' to your included "
+                  @"controls. Swipe into Control Center from any app and tap "
+                  @"the tile to capture or start a video.\n\n"
+                  @"Native gesture bypass injects libClearShotHook.dylib into "
+                  @"SpringBoard via the Tweaks engine, so Power + Home "
+                  @"screenshots bypass FLAG_SECURE system-wide. ⚠ Before "
+                  @"updating iOS, uninject the hook via Tweaks → SpringBoard.\n\n"
+                  @"Full diagnostics for every section live in About Device "
+                  @"→ Diagnostics.";
     footer.textColor = [UIColor grayColor];
     footer.font = [UIFont systemFontOfSize:12];
     footer.numberOfLines = 0;
@@ -130,11 +160,16 @@
 #pragma mark - Status
 
 - (void)refreshStatus {
-    if ([CSInstaller isModuleInstalled]) {
-        self.statusLabel.text = @"✅ Module installed in\n/Library/ControlCenter/Bundles/\n\nIf it doesn't appear in Settings yet, respring.";
+    BOOL cap = [CSInstaller isModuleInstalled];
+    BOOL rec = [CSInstaller isRecordModuleInstalled];
+    if (cap && rec) {
+        self.statusLabel.text = @"✅ Capture + Record modules installed in\n/Library/ControlCenter/Bundles/\n\nIf they don't appear in Settings yet, respring.";
         self.statusLabel.textColor = [UIColor systemGreenColor];
+    } else if (cap) {
+        self.statusLabel.text = @"✅ Capture module installed.\n⚠️ Record module missing — tap step 1 again.";
+        self.statusLabel.textColor = [UIColor systemYellowColor];
     } else {
-        self.statusLabel.text = @"⚠️ Module not installed yet.\n\nTap step 1 to copy ClearShotModule.bundle to the system Control Center directory.";
+        self.statusLabel.text = @"⚠️ Modules not installed yet.\n\nTap step 1 to copy ClearShotModule + ClearShotRecordModule to the system Control Center directory.";
         self.statusLabel.textColor = [UIColor systemOrangeColor];
     }
 }
@@ -204,9 +239,63 @@
     }];
 }
 
-- (void)didTapDiagnostics {
-    NSString *report = [CSInstaller diagnosticReport];
-    [self longMessageSheet:@"Diagnostics" message:report];
+- (void)didTapRecordSettings {
+    CSRecordSettingsViewController *vc = [[CSRecordSettingsViewController alloc] init];
+    [self.navigationController pushViewController:vc animated:YES];
+}
+
+- (void)didToggleDontLock:(UISwitch *)sw {
+    NSError *err = nil;
+    if (![TBSpringBoardPrefs setDontLockActive:sw.on error:&err]) {
+        sw.on = !sw.on;
+        [self alert:@"Write failed" message:err.localizedDescription ?: @"unknown"];
+    }
+}
+
+- (void)didTapNativeHook {
+    // The hook dylib lives in our bundle as libClearShotHook.dylib. We hand
+    // it off to TFInjector targeting SpringBoard. The user gets a status
+    // alert with what happened.
+    NSString *src = [[[NSBundle mainBundle] bundlePath]
+                      stringByAppendingPathComponent:@"libClearShotHook.dylib"];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:src]) {
+        [self longMessageSheet:@"Hook dylib missing"
+                       message:[NSString stringWithFormat:
+                                @"libClearShotHook.dylib isn't in the app "
+                                @"bundle:\n\n%@\n\n"
+                                @"This happens on older builds that didn't "
+                                @"compile the hook. Update to a build that "
+                                @"includes it, or inject your own dylib via "
+                                @"Tweaks → SpringBoard.", src]];
+        return;
+    }
+    UIAlertController *ac = [UIAlertController
+                              alertControllerWithTitle:@"Native gesture bypass"
+                              message:@"Inject libClearShotHook.dylib into SpringBoard?\n\n"
+                                      @"Every subsequent Power + Home screenshot will "
+                                      @"bypass FLAG_SECURE system-wide. A respring "
+                                      @"happens right after.\n\n"
+                                      @"⚠ Install Ad Blocking's \"Block iOS updates\" "
+                                      @"first to keep the hook safe through future iOS "
+                                      @"software update prompts."
+                              preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                           style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Inject + respring"
+                                           style:UIAlertActionStyleDestructive
+                                         handler:^(UIAlertAction *a) {
+        NSError *err = nil;
+        NSString *leaf = [TFInjector injectDylibAtPath:src
+                                             intoAppID:@"com.apple.springboard"
+                                                 error:&err];
+        if (!leaf) {
+            [self longMessageSheet:@"Inject failed"
+                           message:err.localizedDescription ?: @"unknown"];
+            return;
+        }
+        [CSProcessUtils forceRespring];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 #pragma mark - Helpers

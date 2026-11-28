@@ -1,12 +1,38 @@
 #import "LSMainViewController.h"
 #import "LSManager.h"
+#import <MapKit/MapKit.h>
 #import <CoreLocation/CoreLocation.h>
-#import <objc/runtime.h>
 
-@interface LSMainViewController ()
-@property (strong, nonatomic) UITextField *latField;
-@property (strong, nonatomic) UITextField *lngField;
+// ============================================================================
+// LocSim — Andromeda-style MapKit UI. Long-press on the map drops a pin,
+// the search bar accepts named places (geocoded via MKLocalSearch), a
+// Favorites button lists coordinates you save often, and a re-center
+// button zooms (500 m) on your real current location.
+// ============================================================================
+
+static NSString * const kFavoritesKey = @"TBLocSimFavorites"; // array of
+                                                               // @{name,lat,lng}
+
+@interface LSFavorite : NSObject
+@property (copy) NSString *name;
+@property (assign) double lat;
+@property (assign) double lng;
+@end
+@implementation LSFavorite @end
+
+@interface LSMainViewController () <MKMapViewDelegate,
+                                     UISearchBarDelegate,
+                                     CLLocationManagerDelegate>
+@property (strong, nonatomic) MKMapView *mapView;
+@property (strong, nonatomic) UISearchBar *searchBar;
 @property (strong, nonatomic) UILabel *statusLabel;
+@property (strong, nonatomic) UIButton *startBtn;
+@property (strong, nonatomic) UIButton *stopBtn;
+@property (strong, nonatomic) UIButton *favBtn;
+@property (strong, nonatomic) UIButton *recenterBtn;
+@property (strong, nonatomic) MKPointAnnotation *currentPin;
+@property (strong, nonatomic) CLLocationManager *locMgr;
+@property (strong, nonatomic) NSMutableArray<LSFavorite *> *favorites;
 @end
 
 @implementation LSMainViewController
@@ -15,6 +41,8 @@
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor colorWithRed:0.08 green:0.08 blue:0.12 alpha:1.0];
     self.title = @"LocSim";
+
+    [self loadFavorites];
     [self buildUI];
     [self refreshStatus];
 }
@@ -24,134 +52,155 @@
     [self refreshStatus];
 }
 
+#pragma mark - UI
+
 - (void)buildUI {
-    CGFloat w = self.view.bounds.size.width;
-    CGFloat y = 80;
+    CGRect b = self.view.bounds;
 
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(20, y, w - 40, 40)];
-    title.text = @"LocSim";
-    title.textColor = [UIColor whiteColor];
-    title.font = [UIFont systemFontOfSize:30 weight:UIFontWeightBold];
-    [self.view addSubview:title];
-    y += 48;
+    // Search bar at the top.
+    self.searchBar = [[UISearchBar alloc] initWithFrame:
+                       CGRectMake(0, 100, b.size.width, 44)];
+    self.searchBar.barStyle = UIBarStyleBlack;
+    self.searchBar.placeholder = @"Search a place…";
+    self.searchBar.delegate = self;
+    self.searchBar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [self.view addSubview:self.searchBar];
 
-    UILabel *sub = [[UILabel alloc] initWithFrame:CGRectMake(20, y, w - 40, 60)];
-    sub.text = @"Feed a fake GPS location to every app on this device via "
-               @"CLSimulationManager.";
-    sub.textColor = [UIColor lightGrayColor];
-    sub.font = [UIFont systemFontOfSize:14];
-    sub.numberOfLines = 0;
-    [self.view addSubview:sub];
-    y += 70;
+    // Map view takes the center.
+    CGFloat mapTop = CGRectGetMaxY(self.searchBar.frame);
+    CGFloat mapBottom = b.size.height - 180;
+    self.mapView = [[MKMapView alloc] initWithFrame:
+                     CGRectMake(0, mapTop, b.size.width, mapBottom - mapTop)];
+    self.mapView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.mapView.delegate = self;
+    self.mapView.showsCompass = YES;
+    self.mapView.showsScale = YES;
+    [self.view addSubview:self.mapView];
 
-    UIView *card = [[UIView alloc] initWithFrame:CGRectMake(20, y, w - 40, 60)];
-    card.backgroundColor = [UIColor colorWithWhite:0.15 alpha:1.0];
-    card.layer.cornerRadius = 12;
-    [self.view addSubview:card];
-    self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 0, card.bounds.size.width - 28, 60)];
+    // Long-press to drop a pin.
+    UILongPressGestureRecognizer *lp =
+        [[UILongPressGestureRecognizer alloc] initWithTarget:self
+                                                       action:@selector(didLongPressMap:)];
+    lp.minimumPressDuration = 0.6;
+    [self.mapView addGestureRecognizer:lp];
+
+    // Overlay buttons on top-right of the map: favorites + re-center.
+    self.favBtn = [self overlayButtonWithSymbol:@"star.fill"
+                                          action:@selector(didTapFavorites)];
+    self.favBtn.frame = CGRectMake(b.size.width - 56, mapTop + 12, 44, 44);
+    self.favBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+    [self.view addSubview:self.favBtn];
+
+    self.recenterBtn = [self overlayButtonWithSymbol:@"location.circle.fill"
+                                               action:@selector(didTapRecenter)];
+    self.recenterBtn.frame = CGRectMake(b.size.width - 56, mapTop + 64, 44, 44);
+    self.recenterBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+    [self.view addSubview:self.recenterBtn];
+
+    // Status + start/stop row at the bottom.
+    CGFloat y = mapBottom + 12;
+    self.statusLabel = [[UILabel alloc] initWithFrame:
+                         CGRectMake(20, y, b.size.width - 40, 36)];
     self.statusLabel.textColor = [UIColor whiteColor];
-    self.statusLabel.font = [UIFont systemFontOfSize:14];
+    self.statusLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
     self.statusLabel.textAlignment = NSTextAlignmentCenter;
-    self.statusLabel.numberOfLines = 0;
-    [card addSubview:self.statusLabel];
-    y += 72;
+    self.statusLabel.numberOfLines = 2;
+    self.statusLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
+    [self.view addSubview:self.statusLabel];
+    y += 44;
 
-    CGFloat halfW = (w - 40 - 10) / 2.0;
-    self.latField = [self makeField:@"Latitude"  x:20                y:y width:halfW];
-    self.lngField = [self makeField:@"Longitude" x:(20 + halfW + 10) y:y width:halfW];
-    y += 60;
+    CGFloat halfW = (b.size.width - 40 - 12) / 2.0;
+    self.startBtn = [self makeButton:@"Start simulation"
+                               frame:CGRectMake(20, y, halfW, 48)
+                               color:[UIColor systemBlueColor]
+                              action:@selector(didTapStart)];
+    self.startBtn.autoresizingMask = UIViewAutoresizingFlexibleTopMargin;
+    [self.view addSubview:self.startBtn];
 
-    [self makeButton:@"Start simulation"
-                   y:y
-               color:[UIColor systemBlueColor]
-              action:@selector(didTapStart)];
-    y += 62;
-
-    [self makeButton:@"Stop simulation"
-                   y:y
-               color:[UIColor systemOrangeColor]
-              action:@selector(didTapStop)];
-    y += 72;
-
-    UILabel *presetsLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, y, w - 40, 20)];
-    presetsLabel.text = @"Quick presets";
-    presetsLabel.textColor = [UIColor lightGrayColor];
-    presetsLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    [self.view addSubview:presetsLabel];
-    y += 26;
-
-    NSArray *presets = @[
-        @{ @"name": @"Paris",      @"lat": @48.8566,  @"lng": @2.3522  },
-        @{ @"name": @"New York",   @"lat": @40.7128,  @"lng": @-74.0060},
-        @{ @"name": @"Tokyo",      @"lat": @35.6895,  @"lng": @139.6917},
-        @{ @"name": @"Null Island",@"lat": @0.0,      @"lng": @0.0     },
-    ];
-    for (NSDictionary *p in presets) {
-        UIButton *b = [self makeButton:p[@"name"] y:y
-                                 color:[UIColor colorWithWhite:0.22 alpha:1.0]
-                                action:@selector(didTapPreset:)];
-        b.tag = [presets indexOfObject:p];
-        objc_setAssociatedObject(b, "preset", p, OBJC_ASSOCIATION_RETAIN);
-        y += 58;
-    }
+    self.stopBtn = [self makeButton:@"Stop"
+                              frame:CGRectMake(20 + halfW + 12, y, halfW, 48)
+                              color:[UIColor systemOrangeColor]
+                             action:@selector(didTapStop)];
+    self.stopBtn.autoresizingMask = UIViewAutoresizingFlexibleTopMargin
+                                 | UIViewAutoresizingFlexibleLeftMargin;
+    [self.view addSubview:self.stopBtn];
 }
 
-- (UITextField *)makeField:(NSString *)placeholder x:(CGFloat)x y:(CGFloat)y width:(CGFloat)w {
-    UITextField *f = [[UITextField alloc] initWithFrame:CGRectMake(x, y, w, 48)];
-    f.placeholder = placeholder;
-    f.backgroundColor = [UIColor colorWithWhite:0.18 alpha:1.0];
-    f.textColor = [UIColor whiteColor];
-    f.font = [UIFont systemFontOfSize:16];
-    f.keyboardType = UIKeyboardTypeNumbersAndPunctuation;
-    f.autocorrectionType = UITextAutocorrectionTypeNo;
-    f.layer.cornerRadius = 10;
-    UIView *pad = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 12, 1)];
-    f.leftView = pad;
-    f.leftViewMode = UITextFieldViewModeAlways;
-    [self.view addSubview:f];
-    return f;
-}
-
-- (UIButton *)makeButton:(NSString *)title y:(CGFloat)y color:(UIColor *)color action:(SEL)sel {
-    CGFloat w = self.view.bounds.size.width;
+- (UIButton *)overlayButtonWithSymbol:(NSString *)symbolName
+                                 action:(SEL)sel {
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-    b.frame = CGRectMake(20, y, w - 40, 48);
-    [b setTitle:title forState:UIControlStateNormal];
-    [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    b.backgroundColor = color;
-    b.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-    b.layer.cornerRadius = 10;
+    b.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
+    b.tintColor = [UIColor whiteColor];
+    b.layer.cornerRadius = 12;
+    if (@available(iOS 13.0, *)) {
+        [b setImage:[UIImage systemImageNamed:symbolName] forState:UIControlStateNormal];
+    }
     [b addTarget:self action:sel forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:b];
     return b;
 }
 
-#pragma mark - Status
+- (UIButton *)makeButton:(NSString *)title frame:(CGRect)f
+                    color:(UIColor *)color action:(SEL)sel {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    b.frame = f;
+    [b setTitle:title forState:UIControlStateNormal];
+    [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    b.backgroundColor = color;
+    b.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    b.layer.cornerRadius = 10;
+    [b addTarget:self action:sel forControlEvents:UIControlEventTouchUpInside];
+    return b;
+}
 
 - (void)refreshStatus {
-    if ([LSManager isActive]) {
-        self.statusLabel.text = @"✅ Currently simulating.";
-        self.statusLabel.textColor = [UIColor systemGreenColor];
+    if (self.currentPin) {
+        self.statusLabel.text = [NSString stringWithFormat:
+                                  @"Pin: %.5f, %.5f\n%@",
+                                  self.currentPin.coordinate.latitude,
+                                  self.currentPin.coordinate.longitude,
+                                  [LSManager isActive] ? @"✅ Simulating from this pin"
+                                                        : @"Ready — tap Start to begin"];
+        self.statusLabel.textColor = [LSManager isActive]
+            ? [UIColor systemGreenColor] : [UIColor whiteColor];
     } else {
-        self.statusLabel.text = @"⚪️ Idle — enter coordinates then Start.";
+        self.statusLabel.text = @"Long-press the map to drop a pin, or search a place.";
         self.statusLabel.textColor = [UIColor lightGrayColor];
     }
 }
 
-#pragma mark - Actions
+#pragma mark - Map interaction
+
+- (void)didLongPressMap:(UILongPressGestureRecognizer *)g {
+    if (g.state != UIGestureRecognizerStateBegan) return;
+    CGPoint pt = [g locationInView:self.mapView];
+    CLLocationCoordinate2D coord = [self.mapView convertPoint:pt
+                                        toCoordinateFromView:self.mapView];
+    [self setPinAtCoordinate:coord name:nil];
+}
+
+- (void)setPinAtCoordinate:(CLLocationCoordinate2D)coord name:(NSString *)name {
+    if (self.currentPin) {
+        [self.mapView removeAnnotation:self.currentPin];
+    }
+    self.currentPin = [[MKPointAnnotation alloc] init];
+    self.currentPin.coordinate = coord;
+    self.currentPin.title = name ?: @"Dropped pin";
+    [self.mapView addAnnotation:self.currentPin];
+    [self refreshStatus];
+}
+
+#pragma mark - Start / stop
 
 - (void)didTapStart {
-    [self.view endEditing:YES];
-    double lat = [self.latField.text doubleValue];
-    double lng = [self.lngField.text doubleValue];
-    if (lat == 0 && lng == 0 &&
-        self.latField.text.length == 0 && self.lngField.text.length == 0) {
-        [self alert:@"Missing coordinates"
-            message:@"Enter a latitude and a longitude first, or tap one "
-                    @"of the preset buttons below."];
+    if (!self.currentPin) {
+        [self alert:@"No pin"
+            message:@"Drop a pin by long-pressing on the map or picking a "
+                    @"favorite first."];
         return;
     }
-    CLLocation *loc = [[CLLocation alloc] initWithLatitude:lat longitude:lng];
+    CLLocation *loc = [[CLLocation alloc]
+                        initWithLatitude:self.currentPin.coordinate.latitude
+                               longitude:self.currentPin.coordinate.longitude];
     [LSManager startWithLocation:loc];
     [self refreshStatus];
 }
@@ -161,17 +210,189 @@
     [self refreshStatus];
 }
 
-- (void)didTapPreset:(UIButton *)sender {
-    NSDictionary *p = objc_getAssociatedObject(sender, "preset");
-    if (!p) return;
-    double lat = [p[@"lat"] doubleValue];
-    double lng = [p[@"lng"] doubleValue];
-    self.latField.text = [NSString stringWithFormat:@"%.4f", lat];
-    self.lngField.text = [NSString stringWithFormat:@"%.4f", lng];
-    CLLocation *loc = [[CLLocation alloc] initWithLatitude:lat longitude:lng];
-    [LSManager startWithLocation:loc];
-    [self refreshStatus];
+#pragma mark - Search
+
+- (void)searchBarSearchButtonClicked:(UISearchBar *)sb {
+    [sb resignFirstResponder];
+    NSString *q = sb.text;
+    if (!q.length) return;
+
+    MKLocalSearchRequest *req = [[MKLocalSearchRequest alloc] init];
+    req.naturalLanguageQuery = q;
+    req.region = self.mapView.region;
+
+    MKLocalSearch *search = [[MKLocalSearch alloc] initWithRequest:req];
+    [search startWithCompletionHandler:^(MKLocalSearchResponse *resp, NSError *err) {
+        if (err || resp.mapItems.count == 0) {
+            [self alert:@"No match" message:err.localizedDescription ?: @"Nothing found."];
+            return;
+        }
+        MKMapItem *first = resp.mapItems.firstObject;
+        CLLocationCoordinate2D c = first.placemark.coordinate;
+        [self setPinAtCoordinate:c name:(first.name ?: @"Searched")];
+        [self.mapView setRegion:MKCoordinateRegionMakeWithDistance(c, 500, 500)
+                        animated:YES];
+    }];
 }
+
+#pragma mark - Re-center
+
+- (void)didTapRecenter {
+    if (!self.locMgr) {
+        self.locMgr = [[CLLocationManager alloc] init];
+        self.locMgr.delegate = self;
+    }
+    CLAuthorizationStatus st = [CLLocationManager authorizationStatus];
+    if (st == kCLAuthorizationStatusNotDetermined) {
+        [self.locMgr requestWhenInUseAuthorization];
+        return;
+    }
+    if (st == kCLAuthorizationStatusDenied || st == kCLAuthorizationStatusRestricted) {
+        [self alert:@"Location access denied"
+            message:@"Enable it in Settings → Privacy → Location Services → "
+                    @"TrollBox so we can center the map on your real position."];
+        return;
+    }
+    [self.locMgr requestLocation];
+}
+
+- (void)locationManager:(CLLocationManager *)manager
+      didUpdateLocations:(NSArray<CLLocation *> *)locations {
+    CLLocation *loc = locations.lastObject;
+    if (!loc) return;
+    [self.mapView setRegion:MKCoordinateRegionMakeWithDistance(loc.coordinate, 500, 500)
+                    animated:YES];
+}
+
+- (void)locationManager:(CLLocationManager *)manager
+       didFailWithError:(NSError *)error {
+    [self alert:@"Location failed"
+        message:error.localizedDescription ?: @"Unknown error."];
+}
+
+- (void)locationManager:(CLLocationManager *)manager
+  didChangeAuthorizationStatus:(CLAuthorizationStatus)status {
+    if (status == kCLAuthorizationStatusAuthorizedWhenInUse ||
+        status == kCLAuthorizationStatusAuthorizedAlways) {
+        [self.locMgr requestLocation];
+    }
+}
+
+#pragma mark - Favorites
+
+- (void)loadFavorites {
+    NSArray *raw = [[NSUserDefaults standardUserDefaults] arrayForKey:kFavoritesKey];
+    self.favorites = [NSMutableArray array];
+    for (NSDictionary *d in raw) {
+        if (![d isKindOfClass:[NSDictionary class]]) continue;
+        LSFavorite *f = [LSFavorite new];
+        f.name = d[@"name"];
+        f.lat  = [d[@"lat"] doubleValue];
+        f.lng  = [d[@"lng"] doubleValue];
+        if (f.name.length) [self.favorites addObject:f];
+    }
+}
+
+- (void)saveFavorites {
+    NSMutableArray *raw = [NSMutableArray array];
+    for (LSFavorite *f in self.favorites) {
+        [raw addObject:@{ @"name": f.name, @"lat": @(f.lat), @"lng": @(f.lng) }];
+    }
+    [[NSUserDefaults standardUserDefaults] setObject:raw forKey:kFavoritesKey];
+}
+
+- (void)didTapFavorites {
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"Favorites"
+                         message:nil
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+
+    // Add current pin as a favorite
+    if (self.currentPin) {
+        [ac addAction:[UIAlertAction actionWithTitle:@"⭐ Save current pin as favorite"
+                                               style:UIAlertActionStyleDefault
+                                             handler:^(UIAlertAction *a) {
+            [self promptSaveCurrentPin];
+        }]];
+    }
+
+    // One row per saved favorite
+    for (LSFavorite *f in self.favorites) {
+        NSString *title = [NSString stringWithFormat:@"%@ (%.4f, %.4f)",
+                           f.name, f.lat, f.lng];
+        [ac addAction:[UIAlertAction actionWithTitle:title
+                                               style:UIAlertActionStyleDefault
+                                             handler:^(UIAlertAction *a) {
+            CLLocationCoordinate2D c = CLLocationCoordinate2DMake(f.lat, f.lng);
+            [self setPinAtCoordinate:c name:f.name];
+            [self.mapView setRegion:MKCoordinateRegionMakeWithDistance(c, 500, 500)
+                            animated:YES];
+        }]];
+    }
+
+    if (self.favorites.count > 0) {
+        [ac addAction:[UIAlertAction actionWithTitle:@"Manage favorites…"
+                                               style:UIAlertActionStyleDestructive
+                                             handler:^(UIAlertAction *a) {
+            [self presentFavoritesManager];
+        }]];
+    }
+
+    [ac addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                           style:UIAlertActionStyleCancel handler:nil]];
+    ac.popoverPresentationController.sourceView = self.favBtn;
+    ac.popoverPresentationController.sourceRect = self.favBtn.bounds;
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)promptSaveCurrentPin {
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"Save favorite"
+                         message:[NSString stringWithFormat:@"%.5f, %.5f",
+                                  self.currentPin.coordinate.latitude,
+                                  self.currentPin.coordinate.longitude]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *f) {
+        f.placeholder = @"Name (Home, Work, …)";
+    }];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                           style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Save"
+                                           style:UIAlertActionStyleDefault
+                                         handler:^(UIAlertAction *a) {
+        NSString *name = ac.textFields.firstObject.text;
+        if (!name.length) name = @"Unnamed pin";
+        LSFavorite *f = [LSFavorite new];
+        f.name = name;
+        f.lat = self.currentPin.coordinate.latitude;
+        f.lng = self.currentPin.coordinate.longitude;
+        [self.favorites addObject:f];
+        [self saveFavorites];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)presentFavoritesManager {
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"Delete a favorite"
+                         message:nil
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    for (LSFavorite *f in [self.favorites copy]) {
+        [ac addAction:[UIAlertAction actionWithTitle:[NSString stringWithFormat:@"🗑 %@", f.name]
+                                               style:UIAlertActionStyleDestructive
+                                             handler:^(UIAlertAction *a) {
+            [self.favorites removeObject:f];
+            [self saveFavorites];
+        }]];
+    }
+    [ac addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                           style:UIAlertActionStyleCancel handler:nil]];
+    ac.popoverPresentationController.sourceView = self.favBtn;
+    ac.popoverPresentationController.sourceRect = self.favBtn.bounds;
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+#pragma mark - Alert helper
 
 - (void)alert:(NSString *)title message:(NSString *)msg {
     UIAlertController *ac = [UIAlertController alertControllerWithTitle:title

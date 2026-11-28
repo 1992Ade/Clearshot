@@ -5,12 +5,15 @@
 #import "TWMainViewController.h"
 #import "RSMainViewController.h"
 #import "ADMainViewController.h"
-#import "BCMainViewController.h"
 #import "ABMainViewController.h"
 #import "RMMainViewController.h"
 #import "ARMainViewController.h"
-#import "TBPlaceholderViewController.h"
+#import "STMainViewController.h"
+#import "WFMainViewController.h"
 #import "TBAboutViewController.h"
+
+// Badge Color is pushed from SpringBoard Tweaks' Appearance row now —
+// imported there, not at the top-level grid anymore.
 
 typedef UIViewController *(^TBSectionFactory)(void);
 
@@ -53,8 +56,21 @@ typedef UIViewController *(^TBSectionFactory)(void);
 - (void)buildSections {
     NSMutableArray *s = [NSMutableArray array];
 
-    // ----- Top (user-requested ordering) :
-    //   LocSim / Ad Blocking / ResSetter / Badge Color -----
+    // Order fixed 2026-11-28 (post-swap):
+    //   1  LocSim
+    //   2  Ad Blocking
+    //   3  Reclaim Space
+    //   4  AppRepack
+    //   5  SpringBoard Tweaks  (contains Badge Color + Clear All + Don't Lock)
+    //   6  ResSetter
+    //   7  ClearShot
+    //   8  Supervise
+    //   9  Tweaks
+    //   10 Saved WiFi
+    //   11 About Device
+    //   12 About
+    // Jaility dropped; standalone Badge Color merged into SpringBoard Tweaks.
+
     [s addObject:[self section:@"LocSim"
                       subtitle:@"Simulated GPS location"
                         symbol:@"location.fill"
@@ -67,21 +83,32 @@ typedef UIViewController *(^TBSectionFactory)(void);
                           tint:[UIColor systemRedColor]
                        factory:^UIViewController *{ return [[ABMainViewController alloc] init]; }]];
 
+    [s addObject:[self section:@"Reclaim Space"
+                      subtitle:@"Delete analytics/crash/cache iOS forgot"
+                        symbol:@"trash.fill"
+                          tint:[UIColor systemBrownColor]
+                       factory:^UIViewController *{ return [[RMMainViewController alloc] init]; }]];
+
+    [s addObject:[self section:@"AppRepack"
+                      subtitle:@"Install older or newer app versions"
+                        symbol:@"shippingbox.fill"
+                          tint:[UIColor systemMintColor]
+                       factory:^UIViewController *{ return [[ARMainViewController alloc] init]; }]];
+
+    [s addObject:[self section:@"SpringBoard Tweaks"
+                      subtitle:@"Badge Color, Clear All, Don't Lock"
+                        symbol:@"square.grid.2x2.fill"
+                          tint:[UIColor systemPinkColor]
+                       factory:^UIViewController *{ return [[STMainViewController alloc] init]; }]];
+
     [s addObject:[self section:@"ResSetter"
-                      subtitle:@"Display resolution tweaks"
+                      subtitle:@"Display resolution multiplier"
                         symbol:@"rectangle.expand.vertical"
                           tint:[UIColor systemYellowColor]
                        factory:^UIViewController *{ return [[RSMainViewController alloc] init]; }]];
 
-    [s addObject:[self section:@"Badge Color"
-                      subtitle:@"Recolor SpringBoard notification badges"
-                        symbol:@"paintbrush.fill"
-                          tint:[UIColor systemPinkColor]
-                       factory:^UIViewController *{ return [[BCMainViewController alloc] init]; }]];
-
-    // ----- Then the rest -----
     [s addObject:[self section:@"ClearShot"
-                      subtitle:@"CC screenshot, bypass FLAG_SECURE"
+                      subtitle:@"CC Capture+Record, bypass FLAG_SECURE"
                         symbol:@"camera.viewfinder"
                           tint:[UIColor systemBlueColor]
                        factory:^UIViewController *{ return [[CSMainViewController alloc] init]; }]];
@@ -98,36 +125,14 @@ typedef UIViewController *(^TBSectionFactory)(void);
                           tint:[UIColor systemOrangeColor]
                        factory:^UIViewController *{ return [[TWMainViewController alloc] init]; }]];
 
-    [s addObject:[self section:@"Reclaim Space"
-                      subtitle:@"Delete analytics/crash/support logs iOS forgot"
-                        symbol:@"trash.fill"
-                          tint:[UIColor systemBrownColor]
-                       factory:^UIViewController *{ return [[RMMainViewController alloc] init]; }]];
-
-    [s addObject:[self section:@"AppRepack"
-                      subtitle:@"Install older compatible app versions"
-                        symbol:@"shippingbox.fill"
-                          tint:[UIColor systemMintColor]
-                       factory:^UIViewController *{ return [[ARMainViewController alloc] init]; }]];
-
-    [s addObject:[self section:@"Jaility"
-                      subtitle:@"System tweaks (haxi0)"
-                        symbol:@"slider.horizontal.3"
-                          tint:[UIColor systemIndigoColor]
-                       factory:^UIViewController *{
-        return [TBPlaceholderViewController
-                 withTitle:@"Jaility"
-                     blurb:@"Port of Jaility by haxi0 (org.haxi0.Jaility v3.1.1). "
-                           @"A pile of small iOS system tweaks you flip on / off. "
-                           @"Scaffold in place; toggles pending."
-                   planned:@[ @"Hide / Show the Mute Switch in Control Center",
-                              @"Disable / Enable Locking After Respring",
-                              @"Edit the \"Placeholder text\" demo string",
-                              @"One-tap Remove Modifications" ]];
-    }]];
+    [s addObject:[self section:@"Saved WiFi"
+                      subtitle:@"View, reveal password, forget networks"
+                        symbol:@"wifi"
+                          tint:[UIColor systemCyanColor]
+                       factory:^UIViewController *{ return [[WFMainViewController alloc] init]; }]];
 
     [s addObject:[self section:@"About Device"
-                      subtitle:@"Battery, CPU, RAM, network"
+                      subtitle:@"Battery, CPU, RAM, network, diagnostics"
                         symbol:@"iphone"
                           tint:[UIColor systemTealColor]
                        factory:^UIViewController *{ return [[ADMainViewController alloc] init]; }]];

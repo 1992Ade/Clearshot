@@ -1,44 +1,50 @@
 #import "RSMainViewController.h"
 #import "CSProcessUtils.h"
+#import "TBSpringBoardPrefs.h"
+#import <sys/stat.h>
+#import <unistd.h>
+
+// ============================================================================
+// Paths and keys
+// ============================================================================
 
 static NSString * const kGfxPlist =
     @"/var/mobile/Library/Preferences/com.apple.iokit.IOMobileGraphicsFamily.plist";
-static NSString * const kSavedPresetsKey = @"TBResSetterSavedPresets";
 
-// Persist-across-reboot: LaunchDaemon that copies a backup of the gfx prefs
-// into place before backboardd reads them at boot.
+// Don't-lock-after-respring lives in a helper now (TBSpringBoardPrefs) and
+// is mirrored in SpringBoard Tweaks, Badge Color and ClearShot.
+
+// LaunchDaemon that re-applies the saved backup on every boot.
 static NSString * const kAutoApplyDaemonPath =
     @"/Library/LaunchDaemons/com.trollbox.ressetter.plist";
 static NSString * const kAutoApplyBackupPath =
     @"/var/mobile/Library/Preferences/TrollBoxGfxBackup.plist";
 static NSString * const kAutoApplyDaemonLabel = @"com.trollbox.ressetter";
 
-@interface RSPreset : NSObject <NSSecureCoding>
-@property (copy, nonatomic) NSString *name;
-@property (assign, nonatomic) NSInteger width;
-@property (assign, nonatomic) NSInteger height;
-@end
+// NSUserDefaults keys.
+static NSString * const kFactorKey      = @"TBResSetterFactor";
+static NSString * const kLastWidthKey   = @"TBResSetterLastWidth";
+static NSString * const kLastHeightKey  = @"TBResSetterLastHeight";
 
-@implementation RSPreset
-+ (BOOL)supportsSecureCoding { return YES; }
-- (instancetype)initWithCoder:(NSCoder *)c {
-    if ((self = [super init])) {
-        _name   = [[c decodeObjectOfClass:NSString.class forKey:@"n"] copy];
-        _width  = [c decodeIntegerForKey:@"w"];
-        _height = [c decodeIntegerForKey:@"h"];
-    }
-    return self;
-}
-- (void)encodeWithCoder:(NSCoder *)c {
-    [c encodeObject:_name forKey:@"n"];
-    [c encodeInteger:_width forKey:@"w"];
-    [c encodeInteger:_height forKey:@"h"];
-}
-@end
+// The gfx plist keys ResSetter writes/removes.
+static NSString * const kGfxCanvasWidth  = @"canvas_width";
+static NSString * const kGfxCanvasHeight = @"canvas_height";
+static NSString * const kGfxScreenWidth  = @"screenWidth";
+static NSString * const kGfxScreenHeight = @"screenHeight";
+
+// Slider bounds.
+static const double kFactorMin = 1.0;
+static const double kFactorMax = 1.5;
+
+// ============================================================================
 
 @interface RSMainViewController () <UITableViewDataSource, UITableViewDelegate>
 @property (strong, nonatomic) UITableView *table;
-@property (strong, nonatomic) NSMutableArray<RSPreset *> *saved;
+@property (assign, nonatomic) double factor;
+@property (strong, nonatomic) UISlider *factorSlider;
+@property (strong, nonatomic) UILabel *factorReadout;
+@property (strong, nonatomic) UISwitch *autoApplySwitch;
+@property (strong, nonatomic) UISwitch *dontLockSwitch;
 @end
 
 @implementation RSMainViewController
@@ -48,12 +54,7 @@ static NSString * const kAutoApplyDaemonLabel = @"com.trollbox.ressetter";
     self.view.backgroundColor = [UIColor colorWithRed:0.08 green:0.08 blue:0.12 alpha:1.0];
     self.title = @"ResSetter";
 
-    [self loadSaved];
-
-    self.navigationItem.rightBarButtonItem =
-        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
-                                                       target:self
-                                                       action:@selector(didTapAdd)];
+    [self loadFactor];
 
     self.table = [[UITableView alloc] initWithFrame:self.view.bounds
                                               style:UITableViewStyleInsetGrouped];
@@ -64,202 +65,281 @@ static NSString * const kAutoApplyDaemonLabel = @"com.trollbox.ressetter";
     [self.view addSubview:self.table];
 }
 
-#pragma mark - Persistence
-
-- (void)loadSaved {
-    NSData *d = [[NSUserDefaults standardUserDefaults] dataForKey:kSavedPresetsKey];
-    NSMutableArray *arr = nil;
-    if (d) {
-        NSError *err = nil;
-        NSSet *classes = [NSSet setWithObjects:NSArray.class, RSPreset.class, nil];
-        arr = [[NSKeyedUnarchiver unarchivedObjectOfClasses:classes
-                                                   fromData:d
-                                                      error:&err] mutableCopy];
-        if (err) NSLog(@"[TrollBox/Res] decode err=%@", err);
-    }
-    self.saved = arr ?: [NSMutableArray array];
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self.table reloadData];
 }
 
-- (void)saveSaved {
-    NSError *err = nil;
-    NSData *d = [NSKeyedArchiver archivedDataWithRootObject:self.saved
-                                      requiringSecureCoding:YES
-                                                      error:&err];
-    if (err) NSLog(@"[TrollBox/Res] encode err=%@", err);
-    if (d) [[NSUserDefaults standardUserDefaults] setObject:d forKey:kSavedPresetsKey];
+#pragma mark - Factor persistence
+
+- (void)loadFactor {
+    double f = [[NSUserDefaults standardUserDefaults] doubleForKey:kFactorKey];
+    if (f < kFactorMin || f > kFactorMax) f = 1.0;
+    self.factor = f;
 }
 
-#pragma mark - Device native
+- (void)saveFactor:(double)f {
+    self.factor = f;
+    [[NSUserDefaults standardUserDefaults] setDouble:f forKey:kFactorKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
 
+#pragma mark - Device native (LANDSCAPE form)
+
+// iOS expects canvas_width / canvas_height in the gfx plist to be the
+// landscape-orientation form of the panel (width = long side, height =
+// short side). UIScreen.nativeBounds returns portrait form (width = short
+// side, height = long side) on a portrait phone, so we MAX / MIN on the
+// way out — same convention haoict's ResolutionSetterSwift uses. A bug
+// in a previous build wrote the portrait form and caused the x1.2
+// artifacts a user reported.
 - (CGSize)deviceNativeSize {
-    // Native pixel size of the display — not affected by scale, not
-    // affected by a previous ResSetter apply (iOS reports the current
-    // scaled size via mainScreen.bounds; nativeBounds is the hardware
-    // panel resolution).
     UIScreen *s = [UIScreen mainScreen];
     CGRect nb = [s respondsToSelector:@selector(nativeBounds)] ? s.nativeBounds : s.bounds;
-    return CGSizeMake(nb.size.width, nb.size.height);
+    CGFloat longer  = MAX(nb.size.width, nb.size.height);
+    CGFloat shorter = MIN(nb.size.width, nb.size.height);
+    return CGSizeMake(longer, shorter);
 }
 
-- (CGSize)deviceCurrentPointSize {
-    // What UIKit currently reports as the point-size viewport. If a previous
-    // ResSetter write is in effect this reflects that.
-    return [UIScreen mainScreen].bounds.size;
+// Same convention for the "Current" reading — read whatever's in the plist,
+// normalize to landscape form.
+- (CGSize)currentPixelSize {
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:kGfxPlist];
+    NSNumber *w = d[kGfxCanvasWidth];
+    NSNumber *h = d[kGfxCanvasHeight];
+    if (w.doubleValue > 0 && h.doubleValue > 0) {
+        CGFloat longer  = MAX(w.doubleValue, h.doubleValue);
+        CGFloat shorter = MIN(w.doubleValue, h.doubleValue);
+        return CGSizeMake(longer, shorter);
+    }
+    return [self deviceNativeSize];
 }
 
-#pragma mark - Table
+- (CGSize)targetPixelSize {
+    CGSize n = [self deviceNativeSize];
+    return CGSizeMake(round(n.width * self.factor),
+                      round(n.height * self.factor));
+}
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 3; }
+#pragma mark - Table layout
+// 0: This device (Native + Current)
+// 1: Multiplier (slider, target preview, apply)
+// 2: Reset to native (single destructive button)
+// 3: Persistence (re-apply boot + don't lock)
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 4; }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
-    if (s == 0) return 2;        // Device native + current
-    if (s == 1) return MAX((NSInteger)self.saved.count, 1);
-    return 1;                    // Persistence toggle
+    if (s == 0) return 2;         // native + current
+    if (s == 1) return 3;         // slider row, target row, apply row
+    if (s == 2) return 1;         // reset
+    return 2;                      // 2 persistence toggles
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s {
     if (s == 0) return @"This device";
-    if (s == 1) return @"Your saved resolutions";
+    if (s == 1) return @"Multiplier";
+    if (s == 2) return @"Recover";
     return @"Persistence";
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)s {
     if (s == 1) {
-        return @"Tap a saved resolution to apply it. "
-               @"Reboot to revert — unless Persistence is on.";
+        return @"Slide between ×1.00 and ×1.50. The multiplier is persisted. "
+               @"Target = native × factor, rounded to whole pixels in the "
+               @"landscape canvas form the gfx plist expects. Tap Apply to "
+               @"write it, respring to pick it up.";
     }
     if (s == 2) {
-        return @"iOS clears the custom resolution on every reboot. Turn this "
-               @"on to re-apply the last-used resolution automatically after "
-               @"each boot, via a LaunchDaemon that runs before backboardd.\n\n"
-               @"⚠️ If the chosen resolution ever boots to a black screen, "
-               @"hold Volume Down + Side to power off, then boot in safe mode "
-               @"to disable this toggle.";
+        return @"Reset to native nukes every trace ResSetter left behind: the "
+               @"LaunchDaemon (if installed), the saved backup plist, the "
+               @"canvas_* keys in the gfx plist, and the persisted factor in "
+               @"NSUserDefaults. Use this if any prior apply left the device "
+               @"with visual artifacts.";
+    }
+    if (s == 3) {
+        return @"• Re-apply at every boot: installs a LaunchDaemon that "
+               @"restores the last-applied size before backboardd reads it.\n\n"
+               @"• Don't lock device after respring: writes "
+               @"SBDontLockAfterCrash=YES to SpringBoard's managed prefs. "
+               @"Mirrored in SpringBoard Tweaks, Badge Color and ClearShot "
+               @"— change any one, all four stay in sync.";
     }
     return nil;
 }
 
+#pragma mark - Table cells
+
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
-    static NSString *kId = @"c";
-    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:kId];
-    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
-                                             reuseIdentifier:kId];
+    UITableViewCell *cell = [[UITableViewCell alloc]
+                              initWithStyle:UITableViewCellStyleSubtitle
+                             reuseIdentifier:nil];
     cell.backgroundColor = [UIColor colorWithWhite:0.14 alpha:1.0];
     cell.textLabel.textColor = [UIColor whiteColor];
     cell.detailTextLabel.textColor = [UIColor lightGrayColor];
     cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.accessoryView = nil;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    cell.textLabel.textAlignment = NSTextAlignmentLeft;
+    cell.textLabel.font = [UIFont systemFontOfSize:17];
 
     if (ip.section == 0) {
-        CGSize native  = [self deviceNativeSize];
-        CGSize current = [self deviceCurrentPointSize];
-        CGFloat scale = [UIScreen mainScreen].scale;
         if (ip.row == 0) {
+            CGSize n = [self deviceNativeSize];
             cell.textLabel.text = @"Native hardware panel";
             cell.detailTextLabel.text = [NSString stringWithFormat:
+                                         @"%d × %d pixels (landscape)",
+                                         (int)n.width, (int)n.height];
+        } else {
+            CGSize c = [self currentPixelSize];
+            cell.textLabel.text = @"Current";
+            cell.detailTextLabel.text = [NSString stringWithFormat:
                                          @"%d × %d pixels",
-                                         (int)native.width, (int)native.height];
-        } else {
-            cell.textLabel.text = @"Current (what iOS reports now)";
-            cell.detailTextLabel.text = [NSString stringWithFormat:
-                                         @"%d × %d points · @%.0fx",
-                                         (int)current.width, (int)current.height, scale];
+                                         (int)c.width, (int)c.height];
         }
+
     } else if (ip.section == 1) {
-        if (self.saved.count == 0) {
-            cell.textLabel.text = @"No saved resolutions yet";
-            cell.textLabel.textColor = [UIColor lightGrayColor];
-            cell.detailTextLabel.text = @"Tap + in the top-right to add one.";
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
-        } else {
-            RSPreset *p = self.saved[ip.row];
-            cell.textLabel.text = p.name.length ? p.name : @"Preset";
+        if (ip.row == 0) {
+            cell.textLabel.text = nil;
+            cell.detailTextLabel.text = nil;
+            [self installSliderCell:cell];
+
+        } else if (ip.row == 1) {
+            CGSize t = [self targetPixelSize];
+            cell.textLabel.text = @"Target";
             cell.detailTextLabel.text = [NSString stringWithFormat:
-                                         @"%ld × %ld",
-                                         (long)p.width, (long)p.height];
+                                         @"%d × %d pixels",
+                                         (int)t.width, (int)t.height];
+
+        } else {
+            cell.textLabel.text = @"Apply";
+            cell.textLabel.textColor = [UIColor systemBlueColor];
+            cell.textLabel.textAlignment = NSTextAlignmentCenter;
+            cell.textLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-            cell.accessoryType = UITableViewCellAccessoryDetailDisclosureButton;
         }
+
+    } else if (ip.section == 2) {
+        cell.textLabel.text = @"Reset to native";
+        cell.textLabel.textColor = [UIColor systemRedColor];
+        cell.textLabel.textAlignment = NSTextAlignmentCenter;
+        cell.textLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+
     } else {
-        cell.textLabel.text = @"Re-apply last preset at every boot";
-        cell.detailTextLabel.text = [self autoApplyActive]
-            ? @"✅ LaunchDaemon installed"
-            : @"Off — resolution reverts to native on reboot";
-        UISwitch *sw = [[UISwitch alloc] init];
-        sw.on = [self autoApplyActive];
-        [sw addTarget:self action:@selector(didToggleAutoApply:)
-             forControlEvents:UIControlEventValueChanged];
-        cell.accessoryView = sw;
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        if (ip.row == 0) {
+            cell.textLabel.text = @"Re-apply at every boot";
+            BOOL on = [self autoApplyActive];
+            cell.detailTextLabel.text = on
+                ? @"LaunchDaemon installed."
+                : @"Off — resolution reverts to native on reboot.";
+            if (!self.autoApplySwitch) {
+                self.autoApplySwitch = [[UISwitch alloc] init];
+                [self.autoApplySwitch addTarget:self action:@selector(didToggleAutoApply:)
+                                forControlEvents:UIControlEventValueChanged];
+            }
+            self.autoApplySwitch.on = on;
+            cell.accessoryView = self.autoApplySwitch;
+        } else {
+            cell.textLabel.text = @"Don't lock device after respring";
+            BOOL on = [self dontLockActive];
+            cell.detailTextLabel.text = on
+                ? @"SBDontLockAfterCrash = YES."
+                : @"Off — passcode prompt returns after respring.";
+            if (!self.dontLockSwitch) {
+                self.dontLockSwitch = [[UISwitch alloc] init];
+                [self.dontLockSwitch addTarget:self action:@selector(didToggleDontLock:)
+                               forControlEvents:UIControlEventValueChanged];
+            }
+            self.dontLockSwitch.on = on;
+            cell.accessoryView = self.dontLockSwitch;
+        }
     }
     return cell;
 }
 
+- (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
+    if (ip.section == 1 && ip.row == 0) return 72;  // give the slider room
+    return UITableViewAutomaticDimension;
+}
+
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
-    if (ip.section == 0 || ip.section == 2) return;
-    if (self.saved.count == 0) return;
-    RSPreset *p = self.saved[ip.row];
-    [self confirmApply:p];
+    if (ip.section == 1 && ip.row == 2) [self confirmApply];
+    else if (ip.section == 2)           [self confirmReset];
 }
 
-// Swipe-to-delete on saved entries.
-- (BOOL)tableView:(UITableView *)tv canEditRowAtIndexPath:(NSIndexPath *)ip {
-    return ip.section == 1 && self.saved.count > 0;
+#pragma mark - Slider cell
+
+- (void)installSliderCell:(UITableViewCell *)cell {
+    for (UIView *v in [cell.contentView.subviews copy]) [v removeFromSuperview];
+
+    if (!self.factorSlider) {
+        self.factorSlider = [[UISlider alloc] init];
+        self.factorSlider.minimumValue = (float)kFactorMin;
+        self.factorSlider.maximumValue = (float)kFactorMax;
+        self.factorSlider.tintColor    = [UIColor systemBlueColor];
+        [self.factorSlider addTarget:self action:@selector(didSlideFactor:)
+                     forControlEvents:UIControlEventValueChanged];
+    }
+    self.factorSlider.value = (float)self.factor;
+
+    if (!self.factorReadout) {
+        self.factorReadout = [[UILabel alloc] init];
+        self.factorReadout.font = [UIFont monospacedDigitSystemFontOfSize:17
+                                                                   weight:UIFontWeightSemibold];
+        self.factorReadout.textColor = [UIColor whiteColor];
+        self.factorReadout.textAlignment = NSTextAlignmentRight;
+    }
+    self.factorReadout.text = [NSString stringWithFormat:@"×%.2f", self.factor];
+
+    UILabel *header = [[UILabel alloc] init];
+    header.text = @"Factor";
+    header.textColor = [UIColor whiteColor];
+    header.font = [UIFont systemFontOfSize:15];
+    header.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.factorSlider.translatesAutoresizingMaskIntoConstraints = NO;
+    self.factorReadout.translatesAutoresizingMaskIntoConstraints = NO;
+
+    [cell.contentView addSubview:header];
+    [cell.contentView addSubview:self.factorReadout];
+    [cell.contentView addSubview:self.factorSlider];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [header.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:20],
+        [header.topAnchor     constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
+
+        [self.factorReadout.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-20],
+        [self.factorReadout.centerYAnchor  constraintEqualToAnchor:header.centerYAnchor],
+        [self.factorReadout.widthAnchor    constraintEqualToConstant:72],
+
+        [self.factorSlider.leadingAnchor  constraintEqualToAnchor:cell.contentView.leadingAnchor constant:20],
+        [self.factorSlider.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-20],
+        [self.factorSlider.topAnchor      constraintEqualToAnchor:header.bottomAnchor constant:8],
+        [self.factorSlider.bottomAnchor   constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-8],
+    ]];
 }
 
-- (void)tableView:(UITableView *)tv commitEditingStyle:(UITableViewCellEditingStyle)style
-                                      forRowAtIndexPath:(NSIndexPath *)ip {
-    if (style != UITableViewCellEditingStyleDelete) return;
-    [self.saved removeObjectAtIndex:ip.row];
-    [self saveSaved];
-    [tv reloadData];
+- (void)didSlideFactor:(UISlider *)s {
+    // Snap to 0.01 steps for stable readout.
+    double v = round(s.value * 100.0) / 100.0;
+    [self saveFactor:v];
+    self.factorReadout.text = [NSString stringWithFormat:@"×%.2f", self.factor];
+    // Just refresh the Target row.
+    [self.table reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:1 inSection:1]]
+                      withRowAnimation:UITableViewRowAnimationNone];
 }
 
-#pragma mark - Actions
+#pragma mark - Apply
 
-- (void)didTapAdd {
-    UIAlertController *ac = [UIAlertController
-                              alertControllerWithTitle:@"New resolution"
-                              message:@"Keep width and height reasonable. "
-                                      @"Values too far from the native panel "
-                                      @"can leave a black screen; reboot to "
-                                      @"recover."
-                              preferredStyle:UIAlertControllerStyleAlert];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField *f) {
-        f.placeholder = @"Name (optional)";
-    }];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField *f) {
-        f.placeholder = @"Width (pixels)";
-        f.keyboardType = UIKeyboardTypeNumberPad;
-    }];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField *f) {
-        f.placeholder = @"Height (pixels)";
-        f.keyboardType = UIKeyboardTypeNumberPad;
-    }];
-    [ac addAction:[UIAlertAction actionWithTitle:@"Cancel"
-                                           style:UIAlertActionStyleCancel handler:nil]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"Save"
-                                           style:UIAlertActionStyleDefault
-                                         handler:^(UIAlertAction *a) {
-        NSString *name = ac.textFields[0].text;
-        NSInteger w = ac.textFields[1].text.integerValue;
-        NSInteger h = ac.textFields[2].text.integerValue;
-        if (w <= 0 || h <= 0) return;
-        RSPreset *p = [[RSPreset alloc] init];
-        p.name = name.length ? name : [NSString stringWithFormat:@"%ld × %ld", (long)w, (long)h];
-        p.width = w; p.height = h;
-        [self.saved addObject:p];
-        [self saveSaved];
-        [self.table reloadData];
-    }]];
-    [self presentViewController:ac animated:YES completion:nil];
-}
-
-- (void)confirmApply:(RSPreset *)p {
+- (void)confirmApply {
+    CGSize t = [self targetPixelSize];
     NSString *msg = [NSString stringWithFormat:
-                     @"Apply %ld × %ld?\n\nA respring is needed to pick up "
-                     @"the change. Reboot to revert to the original.",
-                     (long)p.width, (long)p.height];
+                     @"Apply %d × %d pixels (native × %.2f)?\n\n"
+                     @"A respring is needed to pick up the change. Reboot "
+                     @"reverts to native unless Re-apply at boot is on.",
+                     (int)t.width, (int)t.height, self.factor];
     UIAlertController *ac = [UIAlertController
                               alertControllerWithTitle:@"Apply resolution"
                               message:msg
@@ -269,19 +349,22 @@ static NSString * const kAutoApplyDaemonLabel = @"com.trollbox.ressetter";
     [ac addAction:[UIAlertAction actionWithTitle:@"Apply"
                                            style:UIAlertActionStyleDestructive
                                          handler:^(UIAlertAction *a) {
-        [self applyPreset:p];
+        [self applyTargetSize:t];
     }]];
     [self presentViewController:ac animated:YES completion:nil];
 }
 
-- (void)applyPreset:(RSPreset *)p {
+- (void)applyTargetSize:(CGSize)t {
+    NSInteger w = (NSInteger)t.width;
+    NSInteger h = (NSInteger)t.height;
+
     NSMutableDictionary *d = [NSMutableDictionary dictionary];
     NSDictionary *existing = [NSDictionary dictionaryWithContentsOfFile:kGfxPlist];
     if (existing) [d addEntriesFromDictionary:existing];
-    d[@"canvas_width"]  = @(p.width);
-    d[@"canvas_height"] = @(p.height);
-    d[@"screenWidth"]   = @(p.width);
-    d[@"screenHeight"]  = @(p.height);
+    d[kGfxCanvasWidth]  = @(w);
+    d[kGfxCanvasHeight] = @(h);
+    d[kGfxScreenWidth]  = @(w);
+    d[kGfxScreenHeight] = @(h);
 
     NSError *writeErr = nil;
     BOOL ok = [d writeToURL:[NSURL fileURLWithPath:kGfxPlist] error:&writeErr];
@@ -292,18 +375,19 @@ static NSString * const kAutoApplyDaemonLabel = @"com.trollbox.ressetter";
         return;
     }
 
-    // If the auto-apply toggle is on, refresh the backup so next boot
-    // restores THIS preset (not whatever was saved earlier).
-    if ([self autoApplyActive]) {
-        [self writeBackupForWidth:p.width height:p.height];
-    }
+    [[NSUserDefaults standardUserDefaults] setInteger:w forKey:kLastWidthKey];
+    [[NSUserDefaults standardUserDefaults] setInteger:h forKey:kLastHeightKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+
+    if ([self autoApplyActive]) [self writeBackupForWidth:w height:h];
+    [self.table reloadData];
 
     UIAlertController *ac = [UIAlertController
                               alertControllerWithTitle:@"Applied"
-                              message:@"Respring now to pick up the new "
-                                      @"resolution?"
+                              message:@"Respring now to pick up the new size?"
                               preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"Later" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Later"
+                                           style:UIAlertActionStyleCancel handler:nil]];
     [ac addAction:[UIAlertAction actionWithTitle:@"Respring now"
                                            style:UIAlertActionStyleDefault
                                          handler:^(UIAlertAction *a) {
@@ -312,7 +396,90 @@ static NSString * const kAutoApplyDaemonLabel = @"com.trollbox.ressetter";
     [self presentViewController:ac animated:YES completion:nil];
 }
 
-#pragma mark - Persist-across-reboot
+#pragma mark - Reset (nuke everything)
+
+- (void)confirmReset {
+    UIAlertController *ac = [UIAlertController
+                              alertControllerWithTitle:@"Reset to native"
+                              message:@"Nuke ResSetter's full state:\n\n"
+                                      @"  • Remove the LaunchDaemon (if installed)\n"
+                                      @"  • Remove the saved backup plist\n"
+                                      @"  • Delete the canvas_* keys in the gfx plist\n"
+                                      @"  • Reset the persisted factor to ×1.00\n\n"
+                                      @"Then respring to the native resolution.\n\n"
+                                      @"Use this if a prior apply left the device "
+                                      @"with visual artifacts or wrong resolution."
+                              preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                           style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Reset + respring"
+                                           style:UIAlertActionStyleDestructive
+                                         handler:^(UIAlertAction *a) {
+        [self performReset];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)performReset {
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    // 1) Remove the LaunchDaemon file. unlink() works at euid=0 after
+    //    setuid(0). If it fails we also try rootSpawn /bin/rm as a belt-
+    //    and-braces fallback.
+    const char *daemonC = [kAutoApplyDaemonPath fileSystemRepresentation];
+    if (unlink(daemonC) != 0 && access(daemonC, F_OK) == 0) {
+        [CSProcessUtils rootSpawn:@"/bin/rm" args:@[@"-f", kAutoApplyDaemonPath]
+                           stdOut:NULL stdErr:NULL];
+    }
+
+    // 2) Remove the backup plist.
+    [fm removeItemAtPath:kAutoApplyBackupPath error:nil];
+
+    // 3) Delete the canvas_* keys from the gfx plist WITHOUT touching the
+    //    rest of the file. If no other keys remain, remove the plist
+    //    entirely so iOS reads its defaults.
+    NSMutableDictionary *d = [[NSMutableDictionary alloc]
+                                initWithContentsOfFile:kGfxPlist];
+    if (d) {
+        [d removeObjectForKey:kGfxCanvasWidth];
+        [d removeObjectForKey:kGfxCanvasHeight];
+        [d removeObjectForKey:kGfxScreenWidth];
+        [d removeObjectForKey:kGfxScreenHeight];
+        if (d.count == 0) {
+            [fm removeItemAtPath:kGfxPlist error:nil];
+        } else {
+            [d writeToURL:[NSURL fileURLWithPath:kGfxPlist] error:nil];
+        }
+    }
+
+    // 4) Reset the NSUserDefaults keys.
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    [u removeObjectForKey:kFactorKey];
+    [u removeObjectForKey:kLastWidthKey];
+    [u removeObjectForKey:kLastHeightKey];
+    [u synchronize];
+    self.factor = 1.0;
+
+    [self.table reloadData];
+
+    // 5) Prompt for immediate respring so backboardd re-reads defaults.
+    UIAlertController *ac = [UIAlertController
+                              alertControllerWithTitle:@"Reset done"
+                              message:@"Daemon removed, backup removed, gfx plist "
+                                      @"keys deleted, factor back to ×1.00.\n\n"
+                                      @"Respring now to drop to native resolution."
+                              preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Later"
+                                           style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Respring now"
+                                           style:UIAlertActionStyleDestructive
+                                         handler:^(UIAlertAction *a) {
+        [CSProcessUtils forceRespring];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+#pragma mark - Persist across reboot (LaunchDaemon)
 
 - (BOOL)autoApplyActive {
     return [[NSFileManager defaultManager] fileExistsAtPath:kAutoApplyDaemonPath];
@@ -320,10 +487,10 @@ static NSString * const kAutoApplyDaemonLabel = @"com.trollbox.ressetter";
 
 - (BOOL)writeBackupForWidth:(NSInteger)w height:(NSInteger)h {
     NSDictionary *payload = @{
-        @"canvas_width":  @(w),
-        @"canvas_height": @(h),
-        @"screenWidth":   @(w),
-        @"screenHeight":  @(h),
+        kGfxCanvasWidth:  @(w),
+        kGfxCanvasHeight: @(h),
+        kGfxScreenWidth:  @(w),
+        kGfxScreenHeight: @(h),
     };
     NSError *err = nil;
     BOOL ok = [payload writeToURL:[NSURL fileURLWithPath:kAutoApplyBackupPath]
@@ -344,31 +511,51 @@ static NSString * const kAutoApplyDaemonLabel = @"com.trollbox.ressetter";
     NSString *shellCmd = [NSString stringWithFormat:
         @"/bin/cp -f '%@' '%@'", kAutoApplyBackupPath, kGfxPlist];
     NSDictionary *daemon = @{
-        @"Label": kAutoApplyDaemonLabel,
+        @"Label":            kAutoApplyDaemonLabel,
         @"ProgramArguments": @[ @"/bin/sh", @"-c", shellCmd ],
-        @"RunAtLoad":  @YES,
-        @"UserName":   @"root",
-        @"GroupName":  @"wheel",
+        @"RunAtLoad":        @YES,
+        @"UserName":         @"root",
+        @"GroupName":        @"wheel",
     };
 
-    // Write the plist to a tmp path we can touch, then rootSpawn /bin/cp it
-    // to /Library/LaunchDaemons/ (which is root:wheel 0755).
-    NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
-                          @"com.trollbox.ressetter.plist"];
-    if (![daemon writeToURL:[NSURL fileURLWithPath:tmpPath] error:outErr]) {
-        return NO;
+    // Preferred path: setuid(0) in main.m gives us euid=0, so NSFileManager
+    // writes to /Library/LaunchDaemons/ directly. chown / chmod are syscall
+    // calls, no spawn needed.
+    NSError *writeErr = nil;
+    BOOL direct = [daemon writeToURL:[NSURL fileURLWithPath:kAutoApplyDaemonPath]
+                                error:&writeErr];
+    if (direct) {
+        chown([kAutoApplyDaemonPath fileSystemRepresentation], 0, 0);
+        chmod([kAutoApplyDaemonPath fileSystemRepresentation], 0644);
+        struct stat st;
+        if (stat([kAutoApplyDaemonPath fileSystemRepresentation], &st) == 0 &&
+            st.st_uid == 0 && st.st_gid == 0 && (st.st_mode & 0777) == 0644) {
+            return YES;
+        }
+        NSLog(@"[TrollBox/Res] direct write stat drift — falling back to rootSpawn");
+    } else {
+        NSLog(@"[TrollBox/Res] direct write err=%@ — falling back to rootSpawn",
+              writeErr);
     }
 
+    // Fallback: rootSpawn.
+    NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                          @"com.trollbox.ressetter.plist"];
+    if (![daemon writeToURL:[NSURL fileURLWithPath:tmpPath] error:outErr]) return NO;
+
+    NSString *out = nil, *errStr = nil;
     int rc = [CSProcessUtils rootSpawn:@"/bin/cp"
                                   args:@[@"-f", tmpPath, kAutoApplyDaemonPath]
-                                stdOut:NULL stdErr:NULL];
+                                stdOut:&out stdErr:&errStr];
     if (rc != 0) {
         if (outErr) *outErr = [NSError errorWithDomain:@"TrollBox" code:11
                                                userInfo:@{NSLocalizedDescriptionKey:
-            [NSString stringWithFormat:@"rootSpawn cp exit=%d", rc]}];
+            [NSString stringWithFormat:@"rootSpawn cp exit=%d%@%@",
+             rc,
+             errStr.length ? [@"\nstderr: " stringByAppendingString:errStr] : @"",
+             out.length    ? [@"\nstdout: " stringByAppendingString:out]    : @""]}];
         return NO;
     }
-    // launchd rejects plists not owned by root:wheel with mode 0644.
     [CSProcessUtils rootSpawn:@"/usr/sbin/chown" args:@[@"root:wheel", kAutoApplyDaemonPath]
                        stdOut:NULL stdErr:NULL];
     [CSProcessUtils rootSpawn:@"/bin/chmod"     args:@[@"0644", kAutoApplyDaemonPath]
@@ -377,31 +564,30 @@ static NSString * const kAutoApplyDaemonLabel = @"com.trollbox.ressetter";
 }
 
 - (void)removeAutoApplyDaemon {
-    [CSProcessUtils rootSpawn:@"/bin/rm" args:@[@"-f", kAutoApplyDaemonPath]
-                       stdOut:NULL stdErr:NULL];
-    // Leave the backup plist alone; harmless.
+    const char *p = [kAutoApplyDaemonPath fileSystemRepresentation];
+    if (unlink(p) != 0 && access(p, F_OK) == 0) {
+        [CSProcessUtils rootSpawn:@"/bin/rm" args:@[@"-f", kAutoApplyDaemonPath]
+                           stdOut:NULL stdErr:NULL];
+    }
 }
 
 - (void)didToggleAutoApply:(UISwitch *)sw {
     if (sw.on) {
-        if (self.saved.count == 0) {
-            [self alert:@"No preset saved"
-                message:@"Save at least one resolution preset first (tap + "
-                        @"in the top-right), then apply it. The persist "
-                        @"toggle will remember that preset for next boot."];
+        NSInteger w = [[NSUserDefaults standardUserDefaults] integerForKey:kLastWidthKey];
+        NSInteger h = [[NSUserDefaults standardUserDefaults] integerForKey:kLastHeightKey];
+        if (w <= 0 || h <= 0) {
+            [self alert:@"Apply once first"
+                message:@"Set a factor and tap Apply at least once so the "
+                        @"daemon has a size to restore."];
             sw.on = NO;
             return;
         }
-        RSPreset *p = self.saved.lastObject;
         UIAlertController *ac = [UIAlertController
                                   alertControllerWithTitle:@"Re-apply at every boot"
                                   message:[NSString stringWithFormat:
-                                           @"Install a LaunchDaemon that "
-                                           @"restores %ld × %ld at each boot?\n\n"
-                                           @"If the resolution ever stops "
-                                           @"booting cleanly, boot in safe "
-                                           @"mode and turn this off.",
-                                           (long)p.width, (long)p.height]
+                                           @"Install a LaunchDaemon that restores "
+                                           @"%ld × %ld at each boot?",
+                                           (long)w, (long)h]
                                   preferredStyle:UIAlertControllerStyleAlert];
         [ac addAction:[UIAlertAction actionWithTitle:@"Cancel"
                                                style:UIAlertActionStyleCancel
@@ -412,12 +598,11 @@ static NSString * const kAutoApplyDaemonLabel = @"com.trollbox.ressetter";
                                                style:UIAlertActionStyleDestructive
                                              handler:^(UIAlertAction *a) {
             NSError *err = nil;
-            BOOL ok = [self installAutoApplyDaemonForWidth:p.width height:p.height
-                                                     error:&err];
+            BOOL ok = [self installAutoApplyDaemonForWidth:w height:h error:&err];
             if (!ok) {
                 sw.on = NO;
                 [self alert:@"Install failed"
-                    message:[NSString stringWithFormat:@"%@\n\nTarget: %@",
+                    message:[NSString stringWithFormat:@"%@\n\nTarget:\n%@",
                              err.localizedDescription ?: @"unknown",
                              kAutoApplyDaemonPath]];
             }
@@ -429,6 +614,24 @@ static NSString * const kAutoApplyDaemonLabel = @"com.trollbox.ressetter";
         [self.table reloadData];
     }
 }
+
+#pragma mark - Don't lock after respring (via shared TBSpringBoardPrefs)
+
+- (BOOL)dontLockActive { return [TBSpringBoardPrefs dontLockActive]; }
+
+- (void)didToggleDontLock:(UISwitch *)sw {
+    NSError *err = nil;
+    if (![TBSpringBoardPrefs setDontLockActive:sw.on error:&err]) {
+        sw.on = !sw.on;
+        [self alert:@"Write failed"
+            message:err.localizedDescription ?: @"unknown"];
+        return;
+    }
+    [self.table reloadSections:[NSIndexSet indexSetWithIndex:3]
+              withRowAnimation:UITableViewRowAnimationAutomatic];
+}
+
+#pragma mark - Alerts
 
 - (void)alert:(NSString *)title message:(NSString *)msg {
     UIAlertController *ac = [UIAlertController alertControllerWithTitle:title

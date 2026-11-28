@@ -308,13 +308,63 @@ static NSString *ABSandboxPACPath(NSString *baseName) {
 }
 
 - (BOOL)isProfileInstalled {
-    Class mcClass = NSClassFromString(@"MCProfileConnection");
-    if (!mcClass) return NO;
-    MCProfileConnection *mc = [mcClass sharedConnection];
-    NSArray *profiles = [mc installedProfilesWithScope:0];
-    for (id prof in profiles) {
-        if ([[prof valueForKey:@"profileIdentifier"] isEqualToString:kABProfileIdentifier])
-            return YES;
+    // Defensive: MCProfileConnection is private, its signature has drifted
+    // across iOS 14/15/16 and some entitlement-stripped builds don't honour
+    // the profiled-access entitlement. If any step of the probe throws, we
+    // just report "unknown → NO" instead of crashing the whole app the first
+    // time the user opens the Ad Blocking section.
+    @try {
+        Class mcClass = NSClassFromString(@"MCProfileConnection");
+        if (!mcClass) return NO;
+        if (![mcClass respondsToSelector:@selector(sharedConnection)]) return NO;
+
+        id mc = [mcClass sharedConnection];
+        if (!mc) return NO;
+        if (![mc respondsToSelector:@selector(installedProfilesWithScope:)]) return NO;
+
+        NSArray *profiles = nil;
+        @try {
+            // Cast via NSInvocation so the private selector is callable
+            // without the compiler complaining about a missing declaration.
+            NSMethodSignature *sig = [mc methodSignatureForSelector:
+                                      @selector(installedProfilesWithScope:)];
+            if (!sig) return NO;
+            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+            inv.target = mc;
+            inv.selector = @selector(installedProfilesWithScope:);
+            int scope = 0;
+            [inv setArgument:&scope atIndex:2];
+            [inv invoke];
+            void *raw = NULL;
+            [inv getReturnValue:&raw];
+            profiles = (__bridge NSArray *)raw;
+        } @catch (NSException *e) {
+            NSLog(@"[TrollBox/AdBlock] installedProfilesWithScope: threw %@", e);
+            return NO;
+        }
+        if (![profiles isKindOfClass:[NSArray class]]) return NO;
+
+        for (id prof in profiles) {
+            NSString *ident = nil;
+            @try {
+                // valueForKey: throws NSUndefinedKeyException if the key is
+                // unknown — some profile objects in later iOS use different
+                // key names. Swallow and skip.
+                if ([prof respondsToSelector:NSSelectorFromString(@"profileIdentifier")]) {
+                    ident = [prof performSelector:NSSelectorFromString(@"profileIdentifier")];
+                } else {
+                    ident = [prof valueForKey:@"profileIdentifier"];
+                }
+            } @catch (NSException *e) {
+                continue;
+            }
+            if ([ident isKindOfClass:[NSString class]] &&
+                [ident isEqualToString:kABProfileIdentifier]) {
+                return YES;
+            }
+        }
+    } @catch (NSException *outer) {
+        NSLog(@"[TrollBox/AdBlock] isProfileInstalled outer catch: %@", outer);
     }
     return NO;
 }

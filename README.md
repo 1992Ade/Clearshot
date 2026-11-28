@@ -2,14 +2,17 @@
 
 > *A single-icon re-bundle of iOS 14-16 TrollStore utilities I use daily.*
 
-**TrollBox** is a re-bundle of various existing TrollStore utilities that I
-find useful and functional on iOS 14-16 (device of reference: iPhone SE
-1st-gen on iOS 15.8.8). Other similar tools exist, but these are the ones I
-actually use; rather than switching between ten apps I put mine under one
-icon. Install once, pick what you need from the home grid.
+**TrollBox** is a re-bundle of various existing TrollStore utilities I find
+useful and functional on iOS 14-16 (device of reference: iPhone SE 1st-gen
+on iOS 15.8.8). Other similar tools exist, but these are the ones I actually
+use; rather than switching between ten apps I put mine under one icon.
+Install once, pick what you need from the home grid.
 
 **No jailbreak. No MobileSubstrate / ElleKit.** TrollStore's
-`platform-application` entitlement is enough.
+`platform-application` entitlement is enough. TrollBox self-elevates to
+`euid=0` in `main()` so every section can write to the root-owned paths it
+needs (CC bundles, LaunchDaemons, SpringBoard managed prefs, system log
+rotations…) without the `rootSpawn` dance.
 
 **Compatibility**: iOS 14.0 - 16.6.1, any device TrollStore runs on - the
 A9 iPhone 6s / SE 1st-gen, iPad Pro 2018 (A12X), everything in between. The
@@ -19,11 +22,29 @@ non-TrollStore users" section below).
 
 **Latest release**: [github.com/1992Ade/TrollBox/releases/latest](https://github.com/1992Ade/TrollBox/releases/latest)
 
+## Home grid order
+
+1. **LocSim**
+2. **Ad Blocking**
+3. **Reclaim Space**
+4. **AppRepack**
+5. **SpringBoard Tweaks** — Badge Color + Clear All + Don't Lock
+6. **ResSetter**
+7. **ClearShot**
+8. **Supervise**
+9. **Tweaks**
+10. **Saved WiFi**
+11. **About Device** (includes Diagnostics)
+12. **About**
+
 ## Sections
 
 ### LocSim — simulated CLLocation
 Feeds a fake GPS fix to every app via the private `CLSimulationManager`.
-Enter coordinates or pick a preset; iOS re-evaluates time zone automatically.
+Port of Andromeda's MapKit UI: long-press on the map to drop a pin, use the
+search bar for named places, save favourites you come back to, tap the
+re-center button to zoom (~500 m) on your real current location when you
+need to pick a spot near you.
 
 ### Ad Blocking — MYbloXX-style blocker, PACs embedded locally
 Port of [MYbloXX for iOS](https://github.com/pegakmupyem/myxxdev) with the
@@ -38,67 +59,216 @@ MYbloXX + StevenBlack at build time. Three user toggles:
 - **Block adult content** — adds ~45 wildcard filters for adult keywords on
   top of the baseline.
 - **Block iOS updates** — installs a fake tvOS Beta Software Profile that
-  silences iOS Software Update. Reversible.
+  silences iOS Software Update. Reversible. **Enable this if you also use
+  ClearShot's native-gesture hook**, so you don't accidentally update iOS
+  with an injected SpringBoard dylib.
 
 Also an in-app "Refresh blocklist from StevenBlack" button so you can pull
-a fresher list between releases.
+a fresher list between releases. `isProfileInstalled` wrapped in defensive
+`@try/@catch` + `respondsToSelector:` so entitlement-stripped builds or
+MCProfileConnection API drift can no longer crash the section on open.
 
-### ResSetter — display resolution tweaks, with persist-at-boot
+### Reclaim Space — free real disk space
+Targeted replacement for the generic iOS "cleanup" tools that free
+basically nothing. Scans the paths iOS actually leaves lying around:
+
+- Analytics panics (`CrashReporter/Analytics/*.synced`)
+- Crash reports (`CrashReporter/*.synced`)
+- AppleSupport / Feedback Assistant logs
+- Rotated system logs (`/var/log/*.log.*` — root-owned, works at `euid=0`)
+- Orphaned app containers (bundleId no longer installed)
+- **App caches** — `Library/Caches/*` per installed app
+- **App tmp** — `tmp/*` per installed app
+- **System caches** — whitelisted subset (dyld, LinkPresentation, newsd, …)
+- **Daemon caches** — WebKit, nsurlsessiond, Suggestions, CloudKit
+
+Shows real sizes before + after, so you know how much was actually freed.
+Delete failures are captured and reported in About Device → Diagnostics.
+
+### AppRepack — install older **and newer** app versions
+Port of [Muffinstore](https://github.com/mineek/muffinstore) plus a
+MinimumOSVersion patcher. Pick an installed app or paste an AppStore URL;
+TrollBox fetches the version history from `apis.bilin.eu.org` and presents
+a custom color-coded picker (not a cramped ActionSheet):
+
+- 🟢 Highest version compatible with your iOS — Apple picks this when you
+  tap "⭐ Latest compatible"
+- 🔴 Newer versions above your iOS — require MinimumOSVersion patching
+- 🔵 Older versions — install directly via `SKUIItemStateCenter`
+
+Full history visible, newest-first, no 10-version cap. For newer versions
+there's a gap-aware warning dialog + an option to patch a manually-
+downloaded `.ipa` via the Files app.
+
+**Realistic success rate after MinimumOSVersion patch, apps 1 iOS major above:**
+
+| App type | Success |
+|---|---|
+| WebView wrappers (Instagram, X, banking, delivery) | ~95 % |
+| Classic UIKit apps | ~60 % |
+| Recent SwiftUI apps | ~30 % |
+| Games / AR / Core ML | ~10 % |
+| Apple system apps | ~0 % |
+
+2 majors above: divide those numbers by three. 3+ majors: forget it.
+
+The patcher rewrites `Payload/App.app/Info.plist`'s `MinimumOSVersion` and
+the Mach-O `LC_BUILD_VERSION` / `LC_VERSION_MIN_IPHONEOS` `minos` field.
+It does NOT decrypt FairPlay — iOS still decrypts the `__TEXT.__text`
+section at launch using your Apple ID's local key.
+
+Your Apple ID session already active on this device handles authentication
+— TrollBox never sees your password.
+
+### ResSetter — display resolution, slider-driven
 Writes `canvas_width` / `canvas_height` to
 `com.apple.iokit.IOMobileGraphicsFamily.plist` so iOS reports your chosen
-logical resolution. Save as many presets as you want. **Persistence toggle**
-installs a LaunchDaemon that re-applies your last preset before backboardd
-at every boot, so the custom resolution survives reboots (safe boot
-disables it so you can recover from a bad choice).
+logical resolution.
 
-### Badge Color — recolor SpringBoard notification badges
-Port of Cowabunga's BadgeChanger. Draws a filled circle of your chosen
-`UIColor` at a chosen radius, writes it to the SpringBoard badge bitmap
-cache. Persist-on-apply: reopening the section restores your last applied
-color/radius instead of the stock red.
+**UI: a slider from ×1.00 to ×1.50**, 0.01-step, persisted in
+`NSUserDefaults`. `Target = native × factor`, rounded. Apply + respring
+picks it up. Reboot reverts (unless Re-apply at boot is on).
+
+**Critical fix from a 2026-11-28 field report**: previous builds wrote the
+plist in portrait form (`canvas_width = short side`), which the iOS
+compositor interprets in landscape convention — causing tiling and visual
+artifacts at certain scales (notably ×1.2 on A9). Current build always
+writes landscape form (`canvas_width = long side`) to match Apple's native
+convention and haoict's ResolutionSetterSwift.
+
+Two Persistence toggles:
+
+- **Re-apply at every boot** — installs a LaunchDaemon that restores your
+  last-applied size before backboardd each boot. Written directly via
+  `NSFileManager` + `chown()`/`chmod()` syscalls (no `rootSpawn` needed
+  since the app runs at `euid=0`); keeps `rootSpawn` as a defensive
+  fallback with full stderr capture. Safe-boot disables it so you can
+  recover from a bad choice.
+- **Don't lock device after respring** — writes `SBDontLockAfterCrash=YES`
+  to `/var/Managed Preferences/mobile/com.apple.springboard.plist`.
+  Mirrored in SpringBoard Tweaks, Badge Color and ClearShot — same key,
+  all four stay in sync. (Mechanism ported out of Jaility.)
+
+**Recovery**: a dedicated **Reset to native** button nukes every trace
+ResSetter left behind — LaunchDaemon file, backup plist, `canvas_*`
+keys in the gfx plist, persisted factor in NSUserDefaults — then prompts
+a respring. Use this if any prior apply left the device with artifacts.
+
+### SpringBoard Tweaks — Badge Color + Clear All + Don't Lock
+Dedicated home for SpringBoard-side modifications:
+
+- **Badge Color** (push row → the full Badge Color screen) — port of
+  Cowabunga's BadgeChanger. Draws a filled circle of your chosen `UIColor`
+  at a chosen radius, writes it to the SpringBoard badge bitmap cache.
+  Persist-on-apply: reopening restores your last confirmed color/radius.
+  The live preview now shows an actual home-screen icon with the badge
+  pip on top, instead of a dark grey square.
+- **Clear All in app switcher** (toggle) — injects `libClearAllHook.dylib`
+  into SpringBoard via the Tweaks engine (TFInjector). After the respring,
+  the native app switcher gets a **Clear All** button in the top right
+  that kills every running process EXCEPT SpringBoard, backboardd,
+  mediaserverd, cfprefsd, launchd, lockdownd, trustd, trollstored and
+  TrollBox itself (so you don't force a respring or break audio).
+- **Don't lock after respring** (toggle) — mirror of the same
+  `SBDontLockAfterCrash` key. Change it here or in ResSetter / Badge Color
+  / ClearShot — the four stay in sync.
+- **Uninject all SB hooks + respring** (red destructive) — single-tap
+  cleanup before an iOS update so SpringBoard launches with no injected
+  dylibs on the new system.
 
 ### ClearShot — Control Center screenshot that bypasses FLAG_SECURE
-Installs a `ClearShotModule.bundle` in `/Library/ControlCenter/Bundles/`.
+Installs `ClearShotModule.bundle` in `/Library/ControlCenter/Bundles/`.
 From any app, swipe into Control Center → tap the tile → the screenshot
 lands in Photos even when the foreground app has FLAG_SECURE set (banking,
 auth, secure messaging). Uses `CARenderServerRenderDisplay` from inside
 SpringBoard.
+
+**Three capture paths, pick what fits:**
+
+| Path | Latency | Setup | Device | Status |
+|---|---|---|---|---|
+| CC module (Capture + Record) | ~250 ms (CC auto-dismiss) | tile added to Control Center | all | stable (default) |
+| Native gesture hook (Power + Home → bypass) | 0 ms, native | one tap in Tweaks to inject `libClearShotHook.dylib` into SpringBoard | all | stable, experimental |
+
+Native gesture hook uses our own Tweaks engine (TFInjector) — no external
+app required. The hook does `method_exchangeImplementations` on
+`SBScreenshotManager _writeScreenshotToCameraRoll:` so every native
+screenshot gesture bypasses FLAG_SECURE system-wide. **Install Ad Blocking's
+"Block iOS updates" first** so you don't accidentally OTA-update with an
+injected dylib still in place; the section cross-links to it.
+
+The Record CC module records video (CARenderServer + `IOSurface` +
+`AVAssetWriter` zero-copy at 30 FPS by default). While recording, a thin
+red overlay over the status-bar clock pulses sinusoidally; tap it to stop.
+A sub-screen "Record settings" lets you pick FPS (15/24/30/60), resolution
+(native/720p/480p), audio (system + microphone toggles) and format
+(H.264/HEVC).
+
+Full diagnostics for every section live in About Device → Diagnostics
+(single place, not a per-section button).
 
 ### Supervise — IsSupervised spoof
 Toggles the `IsSupervised` flag (and an optional `OrganizationName`) in
 `CloudConfigurationDetails.plist`. Unlocks a handful of supervised-only
 iOS settings; same mechanism Ad Blocking uses under the hood.
 
-### Tweaks — dylib / bundle injection (WIP)
-Lists installed user apps. Preamble points to the three well-maintained
-tweak repos to grab dylibs from — YTLite (dayanch96) for YouTube,
-BHInstagram and BHTwitter (BandarHL) for Instagram and Twitter — since
-TrollBox ships no tweaks itself. MachO injection UI is being ported from
-TrollFools.
+### Tweaks — dylib / bundle injection (TrollFools port)
+In-app injection engine ported from
+[TrollFools](https://github.com/Lessica/TrollFools) by Lessica. Pick a
+target app from the installed list, pick a `.dylib` / `.deb` / `.bundle`
+from Files, TrollBox patches the Mach-O load commands and re-signs.
+Separate screen per app shows what's currently injected, with an **Eject**
+swipe to remove. Preamble card points at well-maintained TrollStore-
+compatible tweak sources (YTLite, BHInstagram, BHTwitter, etc.).
 
-### Reclaim Space — free real disk space
-Targeted replacement for the generic iOS "cleanup" tools that free
-basically nothing. Scans the five paths iOS actually leaves lying around:
-analytics panics, crash reports, Feedback Assistant logs, rotated system
-logs, and leftover containers from uninstalled apps. Shows real sizes
-before + after, so you know how much was actually freed.
+The engine lives behind `TFInjector` / `TFMachO` / `TFCodesign` and is
+reused by ClearShot's native-gesture hook (same injection path, different
+caller).
 
-### AppRepack — install older compatible app versions (Muffinstore port)
-Port of [Muffinstore](https://github.com/mineek/muffinstore). Pick an
-installed app or paste an AppStore URL; TrollBox fetches the version
-history from `apis.bilin.eu.org` and triggers the native iOS Store
-download for the version you pick (via private `SKUIItemStateCenter`). Your
-Apple ID session already active on this device handles authentication —
-TrollBox never sees your password. "Latest compatible" option lets Apple's
-Store server pick the newest version that will install on your iOS.
+### Saved WiFi — view, reveal, forget, export
+Lists every network iOS remembers (reads
+`/var/preferences/com.apple.wifi-known-networks.plist` on iOS 15+, falls
+back to the legacy `/var/preferences/SystemConfiguration/com.apple.wifi.plist`).
+Tap an SSID to reveal the stored password (SecItemCopyMatching against the
+`AirPort` keychain service, via our added `keychain-access-groups`), swipe
+left to forget. Export the whole list as CSV via the share sheet. Shows
+your currently-connected SSID at the top, sorts saved networks by last
+auto-join date. **Warning**: if iCloud Keychain is on, forgotten networks
+may resync from your other Apple devices within hours.
 
-### Jaility — small iOS system tweaks (scaffolded)
-Scaffold for a future port of Jaility by haxi0.
+### About Device — battery, device, CPU, RAM, storage, network, Diagnostics
+Reads the private `IOPowerSources` keys that normal apps can't surface:
 
-### About Device — battery health, device, CPU, RAM, storage, network
-Reads the private `IOPowerSources` keys that normal apps can't surface
-(design capacity, cycle count, voltage, temperature), plus system info via
-`sysctl`.
+- Design capacity, Current max (AppleRawMaxCapacity), Nominal charge
+- Battery health (%)
+- Cycle count
+- Voltage (V)
+- **Current** (Amperage, mA) — negative when discharging, positive when charging
+- **Instant current** (InstantAmperage, mA)
+- **Power** (W) — computed from V × A
+- Temperature (°C)
+- Time remaining
+- **Adapter** (name, watts, wireless flag) — appears only when plugged in
+
+Auto-refreshes the Battery section at 1.5 s cadence (NiceBattery-style);
+timer invalidates when you leave the screen so there's zero cost when
+hidden. Plus the usual device / CPU / RAM / storage / network panes.
+
+**Diagnostics** row at the bottom opens a scrollable report aggregating:
+
+- Process identity (pid, uid, euid, gid, egid) — confirms the `setuid(0)`
+  elevation worked (`euid=0` ✅ or fallback warning)
+- iOS version, device machine, bundle path + version
+- Writability (`access(path, W_OK)`) of every root-owned path TrollBox
+  writes to (12 paths)
+- Each section's own diagnostic info (via a `TBDiagnosticProvider`
+  protocol) — self-reported state, last error, cached counters
+
+Copy or share the whole report; attach it to a bug report.
+
+### About — version, credits, license
+Credits every upstream project the sections are ported from, plus the
+icon author (c22dev) and the development assistant (Claude by Anthropic).
 
 ## Install on device
 
@@ -110,10 +280,13 @@ Reads the private `IOPowerSources` keys that normal apps can't surface
    ```
    https://github.com/1992Ade/TrollBox/releases/latest/download/TrollBox.tipa
    ```
-2. Open **TrollBox** from the Home Screen.
+2. Open **TrollBox** from the Home Screen. The app self-elevates to root
+   in `main()` so every section just works — if you see `euid=501` in
+   About Device → Diagnostics, something went wrong at `setuid(0)` and the
+   diagnostics report will say which path is unwritable.
 3. For ClearShot: tap the tile → **1 · Install Control Center module** →
    **2 · Respring now** → **3 · Open Control Center settings**, scroll to
-   *More Controls* and tap **+** next to **ClearShot**.
+   *More Controls* and tap **+** next to **ClearShot** and **Record**.
 4. For Ad Blocking: tap the tile → toggle filters → **Generate & install
    profile**. Enable supervision in the same screen if prompted.
 5. Other sections work out of the box — no install step.
@@ -166,10 +339,12 @@ without re-downloading each time:
    required; re-sign runs every 7 days via a free Apple developer account).
 2. Install the TrollBox `.ipa` from the latest release via SideStore.
 3. Caveat: SideStore strips several entitlements
-   (`platform-application`, `managedconfiguration.profiled-access`). What
-   this means per section:
-   - ✅ About Device, LocSim, BadgeColor work
-   - ❌ ClearShot, ResSetter persistence, AppRepack won't work
+   (`platform-application`, `managedconfiguration.profiled-access`,
+   `persona-mgmt`). `setuid(0)` fails there, so `euid` stays 501 and most
+   root-owned paths are unwritable. Per section:
+   - ✅ About Device, LocSim, Badge Color, Saved WiFi work
+   - ❌ ClearShot, ResSetter persistence, AppRepack, Tweaks native-hook
+     install won't work
    - ⚠️ Ad Blocking can **generate** the mobileconfig but not install it
      silently — the app shares it via the share sheet, you install via
      Settings → Profile Downloaded
@@ -208,6 +383,29 @@ make clean
 make package FINALPACKAGE=1
 ```
 
+## Repo layout
+
+```
+TrollBox/
+├── ClearShot/            (app source — legacy folder name, kept for
+│                          bundle-ID + binary name compatibility with
+│                          existing installs. All ObjC files for every
+│                          section + the main app shell + helpers.)
+├── ClearShotModule/      (Control Center "Capture" bundle source)
+├── MYbloXX/              (Ad Blocking PACs + mobileconfig templates +
+│                          StevenBlack merge scripts)
+├── Resources/            (icon-*.png at every iOS size + icon source)
+├── docs/                 (per-section implementation notes)
+├── .github/              (CI build workflow)
+├── Makefile, Info.plist, entitlements.plist, LICENSE, control
+```
+
+The architecture stays binary-compatible with the historical "ClearShot"
+name — the executable is still called `ClearShot`, the bundle ID is still
+`com.rockylabs.clearshot`, so updating from an older build keeps your
+NSUserDefaults (Badge Color prefs, ResSetter factor, AppRepack history,
+Ad Blocking filter toggles).
+
 ## Credits
 
 Short list; the in-app **About** screen has the per-project detail.
@@ -216,17 +414,20 @@ Short list; the in-app **About** screen has the per-project detail.
 |---|---|
 | [TrollStore](https://github.com/opa334/TrollStore) by opa334 | Platform-application ecosystem |
 | [TrollInstallerDark](https://github.com/rockylabs-dev/TrollInstallerDark) by rockylabs-dev | TrollStore installer for iOS 15.8.x |
-| [Andromeda / Geranium](https://github.com/Son3ra1n/Andromeda) by Son3ra1n | LocSim, Supervise, respring, entitlements template |
-| [TrollFools](https://github.com/Lessica/TrollFools) by Lessica | Tweaks section (dylib/bundle injection path) |
+| [Andromeda / Geranium](https://github.com/Son3ra1n/Andromeda) by Son3ra1n | LocSim MapKit UI, Supervise, respring, `setuid(0)` pattern, entitlements template |
+| [TrollFools](https://github.com/Lessica/TrollFools) by Lessica | Tweaks injection engine (TFInjector / TFMachO / TFCodesign ports) |
 | [ResolutionSetterSwift](https://github.com/haoict/ResolutionSetterSwift) by haoict | ResSetter mechanism |
-| NiceBattery | About Device battery metrics via `IOPowerSources` |
+| [NiceBattery](https://github.com/khanhduytran0/NiceBattery) | About Device battery metrics + auto-refresh pattern |
 | [MYbloXX for iOS](https://github.com/pegakmupyem/myxxdev) by pegakmupyem | Ad Blocking mechanism + base PACs |
 | [StevenBlack/hosts](https://github.com/StevenBlack/hosts) | Fresh blocklists merged into the PACs at build time |
-| [Muffinstore](https://github.com/mineek/muffinstore) by mineek | AppRepack mechanism (`SKUIItemStateCenter`) |
+| [Muffinstore](https://github.com/mineek/muffinstore) by mineek | AppRepack mechanism |
 | [Cowabunga](https://github.com/leminlimez/Cowabunga) by leminlimez (BadgeChanger by exerhythm) | Badge Color |
-| Jaility (haxi0) | Jaility section toggles (scaffolded) |
+| Jaility (haxi0) | `SBDontLockAfterCrash` mechanism migrated into ResSetter |
+| [WiFiList](https://github.com/EthanArbuckle/WiFiList) by EthanArbuckle | Saved WiFi plist layout + keychain query inspiration |
 | [YTLite](https://github.com/dayanch96/YTLite), [BHInstagram](https://github.com/BandarHL/BHInstagram), [BHTwitter](https://github.com/BandarHL/BHTwitter) | Example tweak sources referenced in the Tweaks section preamble |
 | [Apple Configurator 2](https://apps.apple.com/app/apple-configurator-2/id1037126344) | Documented path for non-TrollStore supervision (free, Mac App Store) |
+| [c22dev/TrollBox](https://github.com/c22dev/TrollBox) | **App icon** (GPL v3, re-used with attribution) |
+| [Claude](https://claude.com) by Anthropic | Development assistance — large refactors, port design, documentation. The author drives the architecture and the testing; Claude writes a lot of the ObjC glue. |
 
 ## License
 
@@ -236,6 +437,7 @@ Short list; the in-app **About** screen has the per-project detail.
 
 Provided for personal use, research and accessibility. Some features
 (screen capture of other apps' protected content, simulated locations,
-supervision toggles, binary modification, downloading older app versions)
+supervision toggles, binary modification, downloading older or newer app
+versions than your iOS normally allows, revealing stored WiFi passwords)
 can violate third-party terms of service and, depending on content and
 jurisdiction, local law. Use responsibly on devices you own.

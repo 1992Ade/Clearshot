@@ -11,17 +11,34 @@
 @end
 
 // ============================================================================
-// Target descriptor — a label + path(s) + whether it needs rootSpawn to clean.
+// Target descriptor — a label + path(s) + how to clean it.
+//
+// Historical variants:
+//   - plain (directory + globPattern): walk directory, delete files matching
+//     the pattern — e.g. *.synced files under CrashReporter/Analytics.
+//   - orphanContainers: walk app-container GUIDs, delete the whole folder
+//     for any bundleId that isn't installed.
+//
+// New variants added 2026-11-28:
+//   - appSubpath: for each installed user app, walk a per-container subpath
+//     (e.g. "Library/Caches" or "tmp") and delete everything inside.
+//   - whitelistSubdirs: a parent directory + an array of allow-listed
+//     subdirectory names to clean under it. Used for system caches where
+//     we only want to zap daemon-specific entries, not the whole dir.
 // ============================================================================
 @interface RMTarget : NSObject
-@property (copy) NSString *title;
-@property (copy) NSString *footer;
-@property (copy) NSString *directory;       // walked recursively
-@property (copy) NSString *globPattern;     // nil = everything under directory
-@property (assign) BOOL needsRoot;          // use rootSpawn /bin/rm
-@property (assign) BOOL orphanContainers;   // special: compare against installed apps
+@property (copy)   NSString *title;
+@property (copy)   NSString *footer;
+@property (copy)   NSString *directory;          // walked recursively
+@property (copy)   NSString *globPattern;        // nil = everything under directory
+@property (assign) BOOL     needsRoot;           // use rootSpawn /bin/rm as fallback
+@property (assign) BOOL     orphanContainers;    // compare against installed apps
+@property (assign) BOOL     appSubpath;          // walk per-app subpath
+@property (copy)   NSString *perAppRelative;     // e.g. "Library/Caches"
+@property (assign) BOOL     whitelistSubdirs;    // only clean specific subdirs
+@property (copy)   NSArray<NSString *> *allowedSubdirs;
 @property (assign) unsigned long long scannedBytes;
-@property (assign) BOOL selected;           // UI toggle state
+@property (assign) BOOL     selected;            // UI toggle state
 @end
 @implementation RMTarget
 @end
@@ -53,6 +70,8 @@
 - (NSArray<RMTarget *> *)buildTargets {
     NSMutableArray *arr = [NSMutableArray array];
 
+    // --- iOS-forgotten log piles ---
+
     RMTarget *analytics = [RMTarget new];
     analytics.title = @"Analytics panics";
     analytics.footer = @"iOS collects crash diagnostics here but never deletes them.";
@@ -79,7 +98,7 @@
 
     RMTarget *sysLogs = [RMTarget new];
     sysLogs.title = @"Rotated system logs";
-    sysLogs.footer = @"Old /var/log/*.log.* files (requires rootSpawn to delete).";
+    sysLogs.footer = @"Old /var/log/*.log.* files (needs root — works with setuid(0)).";
     sysLogs.directory = @"/private/var/log";
     sysLogs.globPattern = @".log.";  // only rotated ones
     sysLogs.needsRoot = YES;
@@ -93,6 +112,62 @@
     orphans.needsRoot = NO;
     orphans.orphanContainers = YES;
     [arr addObject:orphans];
+
+    // --- Per-app data piles (what gets listed under Settings → Storage
+    //     → "App Data" in a bloated sum) ---
+
+    RMTarget *appCaches = [RMTarget new];
+    appCaches.title = @"App caches";
+    appCaches.footer = @"Library/Caches of every installed app — apps "
+                        @"re-generate these transparently on next use.";
+    appCaches.directory = @"/private/var/mobile/Containers/Data/Application";
+    appCaches.appSubpath = YES;
+    appCaches.perAppRelative = @"Library/Caches";
+    [arr addObject:appCaches];
+
+    RMTarget *appTmp = [RMTarget new];
+    appTmp.title = @"App tmp";
+    appTmp.footer = @"tmp/ of every installed app (iOS is supposed to clean "
+                     @"these on launch; it often doesn't).";
+    appTmp.directory = @"/private/var/mobile/Containers/Data/Application";
+    appTmp.appSubpath = YES;
+    appTmp.perAppRelative = @"tmp";
+    [arr addObject:appTmp];
+
+    // --- System-wide caches (what makes "Système" balloon in Storage) ---
+
+    RMTarget *systemCaches = [RMTarget new];
+    systemCaches.title = @"System caches";
+    systemCaches.footer = @"System-wide Apple caches — safe subset only "
+                           @"(skip Spotlight, Photo thumbnails, Messages).";
+    systemCaches.directory = @"/private/var/mobile/Library/Caches";
+    systemCaches.whitelistSubdirs = YES;
+    systemCaches.allowedSubdirs = @[
+        @"com.apple.icloud.searchpartyuseragent",
+        @"com.apple.dyld",
+        @"com.apple.LinkPresentation",
+        @"com.apple.AppStore",
+        @"com.apple.newsd",
+        @"com.apple.VideoSubscriberAccount",
+        @"com.apple.icloud.fmfd",
+    ];
+    [arr addObject:systemCaches];
+
+    RMTarget *daemonCaches = [RMTarget new];
+    daemonCaches.title = @"Daemon caches (safe)";
+    daemonCaches.footer = @"WebKit / nsurlsessiond / Suggestions / CloudKit. "
+                           @"Daemons re-build these automatically.";
+    daemonCaches.directory = @"/private/var/mobile/Library/Caches";
+    daemonCaches.whitelistSubdirs = YES;
+    daemonCaches.allowedSubdirs = @[
+        @"com.apple.WebKit.Networking",
+        @"com.apple.WebKit.WebContent",
+        @"com.apple.WebKit.GPU",
+        @"com.apple.nsurlsessiond",
+        @"com.apple.suggestions",
+        @"CloudKit",
+    ];
+    [arr addObject:daemonCaches];
 
     return arr;
 }
@@ -210,11 +285,7 @@
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         for (RMTarget *t in self.targets) {
-            if (t.orphanContainers) {
-                t.scannedBytes = [self scanOrphanedContainers:t.directory];
-            } else {
-                t.scannedBytes = [self scanDirectory:t.directory pattern:t.globPattern];
-            }
+            t.scannedBytes = [self scanTarget:t];
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             [progress dismissViewControllerAnimated:YES completion:^{
@@ -223,6 +294,15 @@
             }];
         });
     });
+}
+
+- (unsigned long long)scanTarget:(RMTarget *)t {
+    if (t.orphanContainers)   return [self scanOrphanedContainers:t.directory];
+    if (t.appSubpath)         return [self scanAppSubpath:t.directory
+                                              perAppRelative:t.perAppRelative];
+    if (t.whitelistSubdirs)   return [self scanWhitelistedSubdirs:t.directory
+                                                              names:t.allowedSubdirs];
+    return [self scanDirectory:t.directory pattern:t.globPattern];
 }
 
 - (unsigned long long)scanDirectory:(NSString *)dir pattern:(NSString *)pattern {
@@ -274,6 +354,45 @@
     return s;
 }
 
+#pragma mark - App-subpath (Library/Caches, tmp, …)
+
+- (unsigned long long)scanAppSubpath:(NSString *)containersDir
+                        perAppRelative:(NSString *)relPath {
+    // For every installed app's data container, size up <container>/<relPath>.
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSSet *installed = [self installedBundleIDs];
+    NSArray *guids = [fm contentsOfDirectoryAtPath:containersDir error:nil];
+    unsigned long long total = 0;
+    for (NSString *guid in guids) {
+        NSString *containerPath = [containersDir stringByAppendingPathComponent:guid];
+        NSString *metaPath = [containerPath stringByAppendingPathComponent:
+                              @".com.apple.mobile_container_manager.metadata.plist"];
+        NSDictionary *meta = [NSDictionary dictionaryWithContentsOfFile:metaPath];
+        NSString *bid = meta[@"MCMMetadataIdentifier"];
+        // Only count containers whose app is still installed — orphans are
+        // handled by the dedicated "Orphaned app containers" target.
+        if (!bid || ![installed containsObject:bid]) continue;
+        NSString *subPath = [containerPath stringByAppendingPathComponent:relPath];
+        total += [self scanDirectory:subPath pattern:nil];
+    }
+    return total;
+}
+
+#pragma mark - Whitelisted subdirs under a parent
+
+- (unsigned long long)scanWhitelistedSubdirs:(NSString *)parent
+                                         names:(NSArray<NSString *> *)names {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    unsigned long long total = 0;
+    for (NSString *name in names) {
+        NSString *path = [parent stringByAppendingPathComponent:name];
+        if ([fm fileExistsAtPath:path]) {
+            total += [self scanDirectory:path pattern:nil];
+        }
+    }
+    return total;
+}
+
 #pragma mark - Reclaim
 
 - (void)doReclaim {
@@ -298,56 +417,131 @@
 
 - (void)performReclaim {
     unsigned long long freed = 0;
+    NSUInteger failures = 0;
     for (RMTarget *t in self.targets) {
         if (!t.selected) continue;
         unsigned long long before = t.scannedBytes;
-        [self cleanTarget:t];
-        // Re-scan to measure what's actually gone.
-        unsigned long long after = t.orphanContainers
-            ? [self scanOrphanedContainers:t.directory]
-            : [self scanDirectory:t.directory pattern:t.globPattern];
+        failures += [self cleanTarget:t];
+        unsigned long long after = [self scanTarget:t];
         freed += (before > after) ? (before - after) : 0;
         t.scannedBytes = after;
     }
     [self.tableView reloadData];
-    [self alert:@"Done"
-        message:[NSString stringWithFormat:@"Freed %@. Thanks for cleaning up.",
-                 [self humanBytes:freed]]];
+    NSString *msg = [NSString stringWithFormat:@"Freed %@. Thanks for cleaning up.",
+                     [self humanBytes:freed]];
+    if (failures > 0) {
+        msg = [msg stringByAppendingFormat:@"\n\n(%lu files couldn't be deleted — "
+                                             @"see About Device → Diagnostics.)",
+               (unsigned long)failures];
+    }
+    [self alert:@"Done" message:msg];
 }
 
-- (void)cleanTarget:(RMTarget *)t {
-    if (t.orphanContainers) {
-        NSFileManager *fm = [NSFileManager defaultManager];
-        NSSet *installed = [self installedBundleIDs];
-        NSArray *guids = [fm contentsOfDirectoryAtPath:t.directory error:nil];
-        for (NSString *guid in guids) {
-            NSString *path = [t.directory stringByAppendingPathComponent:guid];
-            NSString *metaPath = [path stringByAppendingPathComponent:
-                                  @".com.apple.mobile_container_manager.metadata.plist"];
-            NSDictionary *meta = [NSDictionary dictionaryWithContentsOfFile:metaPath];
-            NSString *bid = meta[@"MCMMetadataIdentifier"];
-            if (bid && ![installed containsObject:bid]) {
-                [fm removeItemAtPath:path error:nil];
+// Returns the number of files that failed to delete so we can report back to
+// the user instead of pretending everything went fine.
+- (NSUInteger)cleanTarget:(RMTarget *)t {
+    if (t.orphanContainers)  return [self cleanOrphanedContainers:t];
+    if (t.appSubpath)        return [self cleanAppSubpath:t];
+    if (t.whitelistSubdirs)  return [self cleanWhitelistedSubdirs:t];
+    return [self cleanPlainDirectory:t];
+}
+
+- (NSUInteger)cleanOrphanedContainers:(RMTarget *)t {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSSet *installed = [self installedBundleIDs];
+    NSArray *guids = [fm contentsOfDirectoryAtPath:t.directory error:nil];
+    NSUInteger fails = 0;
+    for (NSString *guid in guids) {
+        NSString *path = [t.directory stringByAppendingPathComponent:guid];
+        NSString *metaPath = [path stringByAppendingPathComponent:
+                              @".com.apple.mobile_container_manager.metadata.plist"];
+        NSDictionary *meta = [NSDictionary dictionaryWithContentsOfFile:metaPath];
+        NSString *bid = meta[@"MCMMetadataIdentifier"];
+        if (bid && ![installed containsObject:bid]) {
+            NSError *err = nil;
+            if (![fm removeItemAtPath:path error:&err]) {
+                NSLog(@"[TrollBox/Reclaim] orphan rm %@ err=%@", path, err);
+                fails++;
             }
         }
-        return;
     }
+    return fails;
+}
 
+- (NSUInteger)cleanPlainDirectory:(RMTarget *)t {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSDirectoryEnumerator *e = [fm enumeratorAtPath:t.directory];
     NSString *rel;
+    NSUInteger fails = 0;
     while ((rel = [e nextObject])) {
         if (t.globPattern && ![rel containsString:t.globPattern]) continue;
         NSString *full = [t.directory stringByAppendingPathComponent:rel];
         NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
         if (![attrs[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
-        if (t.needsRoot) {
-            [CSProcessUtils rootSpawn:@"/bin/rm" args:@[@"-f", full]
-                               stdOut:NULL stdErr:NULL];
-        } else {
-            [fm removeItemAtPath:full error:nil];
+        if (![self deleteFile:full needsRoot:t.needsRoot]) fails++;
+    }
+    return fails;
+}
+
+- (NSUInteger)cleanAppSubpath:(RMTarget *)t {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSSet *installed = [self installedBundleIDs];
+    NSArray *guids = [fm contentsOfDirectoryAtPath:t.directory error:nil];
+    NSUInteger fails = 0;
+    for (NSString *guid in guids) {
+        NSString *containerPath = [t.directory stringByAppendingPathComponent:guid];
+        NSString *metaPath = [containerPath stringByAppendingPathComponent:
+                              @".com.apple.mobile_container_manager.metadata.plist"];
+        NSDictionary *meta = [NSDictionary dictionaryWithContentsOfFile:metaPath];
+        NSString *bid = meta[@"MCMMetadataIdentifier"];
+        if (!bid || ![installed containsObject:bid]) continue;
+        NSString *subPath = [containerPath stringByAppendingPathComponent:t.perAppRelative];
+        fails += [self deleteContentsOfDirectory:subPath needsRoot:NO];
+    }
+    return fails;
+}
+
+- (NSUInteger)cleanWhitelistedSubdirs:(RMTarget *)t {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSUInteger fails = 0;
+    for (NSString *name in t.allowedSubdirs) {
+        NSString *path = [t.directory stringByAppendingPathComponent:name];
+        if ([fm fileExistsAtPath:path]) {
+            fails += [self deleteContentsOfDirectory:path needsRoot:NO];
         }
     }
+    return fails;
+}
+
+// Deletes the children of `dir` but keeps the dir itself so iOS doesn't
+// recreate it empty during the next operation.
+- (NSUInteger)deleteContentsOfDirectory:(NSString *)dir needsRoot:(BOOL)needsRoot {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray *children = [fm contentsOfDirectoryAtPath:dir error:nil];
+    NSUInteger fails = 0;
+    for (NSString *name in children) {
+        NSString *full = [dir stringByAppendingPathComponent:name];
+        if (![self deleteFile:full needsRoot:needsRoot]) fails++;
+    }
+    return fails;
+}
+
+// Common delete path with error capture + rootSpawn fallback.
+- (BOOL)deleteFile:(NSString *)path needsRoot:(BOOL)needsRoot {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSError *err = nil;
+    if ([fm removeItemAtPath:path error:&err]) return YES;
+    // If the file is root-owned and setuid(0) didn't elevate, fall back to
+    // rootSpawn /bin/rm to force it.
+    if (needsRoot || [err.domain isEqualToString:NSCocoaErrorDomain]) {
+        int rc = [CSProcessUtils rootSpawn:@"/bin/rm" args:@[@"-rf", path]
+                                    stdOut:NULL stdErr:NULL];
+        if (rc == 0) return YES;
+        NSLog(@"[TrollBox/Reclaim] rm %@ err=%@ (rootSpawn rc=%d)", path, err, rc);
+    } else {
+        NSLog(@"[TrollBox/Reclaim] rm %@ err=%@", path, err);
+    }
+    return NO;
 }
 
 #pragma mark - Helpers

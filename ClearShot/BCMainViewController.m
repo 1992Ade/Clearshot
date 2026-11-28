@@ -1,5 +1,6 @@
 #import "BCMainViewController.h"
 #import "CSProcessUtils.h"
+#import "TBSpringBoardPrefs.h"
 
 // Same path Cowabunga's BadgeChanger.swift targets. SpringBoard reads this
 // file when drawing a badge; replacing it changes every badge system-wide.
@@ -41,6 +42,7 @@ static UIColor *BCHexToColor(NSString *hex) {
 @property (strong, nonatomic) UIView *badgeDot;
 @property (strong, nonatomic) UILabel *badgeCount;
 @property (strong, nonatomic) UILabel *statusLabel;
+@property (strong, nonatomic) UISwitch *dontLockSwitch;
 
 // Current picker state.
 @property (strong, nonatomic) UIColor *chosenColor;
@@ -48,6 +50,13 @@ static UIColor *BCHexToColor(NSString *hex) {
 @end
 
 @implementation BCMainViewController
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    // Resync the mirror in case a sibling section (ResSetter, ClearShot,
+    // SpringBoard Tweaks) changed SBDontLockAfterCrash while we were gone.
+    self.dontLockSwitch.on = [TBSpringBoardPrefs dontLockActive];
+}
 
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -105,12 +114,28 @@ static UIColor *BCHexToColor(NSString *hex) {
         y += 48;
     }
 
-    // Live preview: a square icon placeholder with a dot in the corner.
+    // Live preview — use our own app icon under the badge so the preview
+    // actually looks like a real home-screen icon with a notification pip,
+    // not a dark grey square. The Makefile's after-stage step drops icon-N.png
+    // at the root of the .app bundle, so [UIImage imageNamed:] finds them.
     CGFloat iconSize = 110;
     CGFloat iconX = (w - iconSize) / 2.0;
-    self.previewIcon = [[UIView alloc] initWithFrame:CGRectMake(iconX, y, iconSize, iconSize)];
-    self.previewIcon.backgroundColor = [UIColor colorWithWhite:0.25 alpha:1.0];
-    self.previewIcon.layer.cornerRadius = iconSize * 0.22;
+    UIImageView *iconView = [[UIImageView alloc] initWithFrame:
+                             CGRectMake(iconX, y, iconSize, iconSize)];
+    UIImage *icon = [UIImage imageNamed:@"icon-120"]
+                 ?: [UIImage imageNamed:@"icon-180"]
+                 ?: [UIImage imageNamed:@"icon-152"]
+                 ?: [UIImage imageNamed:@"icon-60@2x"]
+                 ?: [UIImage imageNamed:@"AppIcon"];
+    iconView.image = icon;
+    iconView.contentMode = UIViewContentModeScaleAspectFill;
+    iconView.layer.cornerRadius = iconSize * 0.22;
+    iconView.layer.masksToBounds = YES;
+    // Fallback tint if no icon resource is available (e.g. a dev build run
+    // outside the staging path) — a dark card still reads as "an icon" with
+    // the badge pip on top.
+    if (!icon) iconView.backgroundColor = [UIColor colorWithWhite:0.25 alpha:1.0];
+    self.previewIcon = iconView;
     [self.view addSubview:self.previewIcon];
 
     CGFloat badgeSize = 38;
@@ -182,15 +207,44 @@ static UIColor *BCHexToColor(NSString *hex) {
                    y:y
                color:[UIColor colorWithWhite:0.22 alpha:1.0]
               action:@selector(didTapReset)];
-    y += 62;
+    y += 72;
 
-    UILabel *footer = [[UILabel alloc] initWithFrame:CGRectMake(20, y, w - 40, 60)];
+    // Don't-lock-after-respring mirror. Badge Color Apply triggers a
+    // respring too, so we expose the same toggle here as a convenience.
+    // TBSpringBoardPrefs talks to the same SBDontLockAfterCrash key that
+    // ResSetter, ClearShot and SpringBoard Tweaks hit — all four stay in
+    // sync automatically.
+    UILabel *dlLabel = [[UILabel alloc] initWithFrame:
+                         CGRectMake(20, y, w - 40 - 60, 32)];
+    dlLabel.text = @"Don't lock after respring";
+    dlLabel.textColor = [UIColor whiteColor];
+    dlLabel.font = [UIFont systemFontOfSize:14];
+    [self.view addSubview:dlLabel];
+
+    self.dontLockSwitch = [[UISwitch alloc] initWithFrame:
+                           CGRectMake(w - 20 - 50, y, 50, 32)];
+    self.dontLockSwitch.on = [TBSpringBoardPrefs dontLockActive];
+    [self.dontLockSwitch addTarget:self action:@selector(didToggleDontLock:)
+                    forControlEvents:UIControlEventValueChanged];
+    [self.view addSubview:self.dontLockSwitch];
+    y += 42;
+
+    UILabel *footer = [[UILabel alloc] initWithFrame:CGRectMake(20, y, w - 40, 80)];
     footer.text = @"Apply writes the new bitmap, then prompts for a respring. "
-                  @"Reset deletes the file so iOS falls back to the default red.";
+                  @"Reset deletes the file so iOS falls back to the default red. "
+                  @"Don't-lock toggle is mirrored from SpringBoard Tweaks.";
     footer.textColor = [UIColor grayColor];
     footer.font = [UIFont systemFontOfSize:12];
     footer.numberOfLines = 0;
     [self.view addSubview:footer];
+}
+
+- (void)didToggleDontLock:(UISwitch *)sw {
+    NSError *err = nil;
+    if (![TBSpringBoardPrefs setDontLockActive:sw.on error:&err]) {
+        sw.on = !sw.on;
+        [self alert:@"Write failed" message:err.localizedDescription ?: @"unknown"];
+    }
 }
 
 - (UIButton *)makeButton:(NSString *)title y:(CGFloat)y color:(UIColor *)color action:(SEL)sel {

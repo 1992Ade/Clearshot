@@ -77,11 +77,55 @@ static CFStringRef cs_resolve_display_id(void) {
     return [[NSFileManager defaultManager] fileExistsAtPath:[self systemInstallPath]];
 }
 
++ (NSString *)recordSystemInstallPath {
+    return @"/Library/ControlCenter/Bundles/ClearShotRecordModule.bundle";
+}
+
++ (NSString *)recordEmbeddedBundlePath {
+    return [[[NSBundle mainBundle] bundlePath]
+            stringByAppendingPathComponent:@"ClearShotRecordModule.bundle"];
+}
+
++ (BOOL)isRecordModuleInstalled {
+    return [[NSFileManager defaultManager] fileExistsAtPath:[self recordSystemInstallPath]];
+}
+
 #pragma mark - Install
 
 + (BOOL)installModuleReturningError:(NSError **)error {
-    NSString *src = [self embeddedBundlePath];
-    NSString *dst = [self systemInstallPath];
+    // 1) Install the Capture module first.
+    if (![self installBundleFromPath:[self embeddedBundlePath]
+                              toPath:[self systemInstallPath]
+                           binaryLeaf:@"ClearShotModule"
+                                error:error]) {
+        return NO;
+    }
+    // 2) Then the Record twin. If the embedded Record bundle is missing
+    //    (older build without the Record module compiled), we just note it
+    //    in NSLog and don't fail the install — Capture alone is still
+    //    useful.
+    NSString *recSrc = [self recordEmbeddedBundlePath];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:recSrc]) {
+        NSLog(@"[ClearShot/Installer] Record bundle not in app — skipping (%@)", recSrc);
+        return YES;
+    }
+    NSError *recErr = nil;
+    if (![self installBundleFromPath:recSrc
+                              toPath:[self recordSystemInstallPath]
+                           binaryLeaf:@"ClearShotRecordModule"
+                                error:&recErr]) {
+        NSLog(@"[ClearShot/Installer] Record install failed: %@ — Capture install stays", recErr);
+        // Not fatal. Report via the next diagnostics pull.
+    }
+    return YES;
+}
+
+// Shared body for both bundles so we don't duplicate 90 lines of rootSpawn
+// dance. All of the original install error reporting is preserved.
++ (BOOL)installBundleFromPath:(NSString *)src
+                         toPath:(NSString *)dst
+                     binaryLeaf:(NSString *)binaryLeaf
+                          error:(NSError **)error {
     NSFileManager *fm = [NSFileManager defaultManager];
 
     // Build a verbose error if the embedded bundle is missing — the user
@@ -171,7 +215,7 @@ static CFStringRef cs_resolve_display_id(void) {
         [CSProcessUtils rootSpawn:@"/bin/chmod" args:@[@"644", child]
                            stdOut:NULL stdErr:NULL];
     }
-    NSString *binaryPath = [dst stringByAppendingPathComponent:@"ClearShotModule"];
+    NSString *binaryPath = [dst stringByAppendingPathComponent:binaryLeaf];
     if ([fm fileExistsAtPath:binaryPath]) {
         [CSProcessUtils rootSpawn:@"/bin/chmod" args:@[@"755", binaryPath]
                            stdOut:NULL stdErr:NULL];
@@ -445,6 +489,20 @@ static CFStringRef cs_resolve_display_id(void) {
      img ? @"✅ got an image" : @"❌ no image",
      path ?: @"(none)"];
 
+    return r;
+}
+
+// Bridge to TBDiagnosticProvider — the global diagnostics aggregator looks
+// for +diagnosticInfo on each section class. We return a slim status
+// summary; the big one-shot Test capture of diagnosticReport belongs on an
+// explicit tap, not every time someone opens About Device → Diagnostics.
++ (NSString *)diagnosticInfo {
+    NSMutableString *r = [NSMutableString string];
+    [r appendFormat:@"Module installed in /Library/ControlCenter/Bundles/: %@\n",
+     [self isModuleInstalled] ? @"✅ yes" : @"❌ no"];
+    RenderDisplayFn fn = cs_resolve_render();
+    [r appendFormat:@"CARenderServerRenderDisplay symbol: %@\n",
+     fn ? @"✅ resolved" : @"❌ not found"];
     return r;
 }
 

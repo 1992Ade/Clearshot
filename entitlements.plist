@@ -81,6 +81,20 @@
          reuses the user's active Apple ID session). -->
     <key>com.apple.itunesstored.private</key>
     <true/>
+
+    <!-- Saved WiFi: read SSIDs and passwords from Apple's keychain group
+         (service "AirPort"). The apple group is what every SystemConfiguration
+         component uses; SecItemCopyMatching with kSecAttrService=AirPort
+         queries it when we belong to this group. -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>apple</string>
+        <string>com.apple.wifi</string>
+        <string>com.apple.identities</string>
+        <string>com.apple.certificates</string>
+    </array>
+    <key>com.apple.wifi.manager-access</key>
+    <true/>
     <key>com.apple.private.mobileinstall.allowedSPI</key>
     <array>
         <string>UninstallForLaunchServices</string>

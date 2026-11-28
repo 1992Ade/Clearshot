@@ -1,7 +1,22 @@
 #import <UIKit/UIKit.h>
+#import <unistd.h>
 #import "CSAppDelegate.h"
 
+// Elevate to root BEFORE UIKit spins up. TrollStore's platform-application +
+// no-sandbox + no-container entitlements give us the RIGHT to elevate, but
+// LaunchServices starts us at uid=501 (mobile) for compatibility — we have
+// to make the setuid(0)/setgid(0) call ourselves, same pattern Andromeda
+// uses in its own main.m. Without this, every root-owned path write
+// (/Library/ControlCenter/Bundles for ClearShot, /Library/LaunchDaemons for
+// ResSetter, /private/var/log for Reclaim Space, /var/Managed Preferences
+// for the Don't Lock After Respring toggle) silently fails and rootSpawn
+// returns exit=-1 because the kernel SIGKILLs the persona-overridden child.
+//
+// After these two lines: getuid() == geteuid() == 0, and NSFileManager
+// writes/removes anywhere / allows us to write.
 int main(int argc, char *argv[]) {
+    setuid(0);
+    setgid(0);
     @autoreleasepool {
         return UIApplicationMain(argc, argv, nil, NSStringFromClass([CSAppDelegate class]));
     }

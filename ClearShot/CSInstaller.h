@@ -21,7 +21,16 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSString *)embeddedBundlePath;
 + (BOOL)isModuleInstalled;
 
+// Record module (the twin that saves video instead of a still). Installed
+// alongside the Capture module by installModuleReturningError: — individual
+// accessors are exposed for diagnostics and the status label.
++ (NSString *)recordSystemInstallPath;
++ (NSString *)recordEmbeddedBundlePath;
++ (BOOL)isRecordModuleInstalled;
+
 // --- Install ---------------------------------------------------------------
+// Installs both the Capture and Record CC bundles. Returns NO on the FIRST
+// failure with a verbose error describing which bundle broke.
 + (BOOL)installModuleReturningError:(NSError **)error;
 
 // --- Respring --------------------------------------------------------------
